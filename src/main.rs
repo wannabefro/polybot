@@ -199,6 +199,7 @@ async fn main() -> Result<()> {
     let mut mean_revert_enabled = cfg.nav_usdc >= cfg.mean_revert_min_nav_usdc;
     let mut max_markets = cfg.max_active_markets();
     let mut live_nav = cfg.nav_usdc;
+    let mut live_nav_initialized = false;
 
     info!(
         paper_mode = cfg.paper_mode,
@@ -239,7 +240,10 @@ async fn main() -> Result<()> {
             Ok(()) = nav_rx.changed() => {
                 let snap = nav_rx.borrow().clone();
                 let new_nav = snap.total_nav;
-                if (new_nav - live_nav).abs() >= 1.0 {
+                // Always apply first real update (live_nav_initialized), then
+                // only apply subsequent updates if delta >= $1.
+                if !live_nav_initialized || (new_nav - live_nav).abs() >= 1.0 {
+                    live_nav_initialized = true;
                     // Update risk limits
                     risk_engine.update_nav(new_nav, &cfg);
 
