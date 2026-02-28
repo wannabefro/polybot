@@ -104,6 +104,7 @@ async fn main() -> Result<()> {
     let _recon_handle = risk::position::spawn_recon(
         &cfg,
         auth_ctx.client.clone(),
+        auth_ctx.signer.clone(),
         risk_engine.clone(),
     );
 

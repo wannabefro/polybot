@@ -6,9 +6,10 @@ use rust_decimal::Decimal;
 use tokio::time;
 use tracing::{error, info, warn};
 
-use crate::auth::AuthClient;
+use crate::auth::{AuthClient, Signer};
 use crate::config::Config;
 use crate::risk::guardrails::RiskEngine;
+use polymarket_client_sdk::auth::Signer as SignerTrait;
 
 /// Snapshot of reconciled positions.
 #[derive(Debug, Clone, Default)]
@@ -23,18 +24,11 @@ pub struct PositionSnapshot {
 const RECON_MISMATCH_THRESHOLD_PCT: f64 = 0.01; // 1% NAV
 
 /// Fetch positions from the Polymarket data API.
-async fn fetch_remote_positions(_client: &AuthClient) -> Result<HashMap<String, Decimal>> {
-    // The data API positions endpoint requires a separate client configuration.
-    // The CLOB client doesn't directly expose positions — this needs the data::Client.
-    // When the data client is properly integrated:
-    //   let positions = data_client.positions(&PositionsRequest::default()).await?;
-    //
-    // For now, use a REST call to the data API endpoint.
-    // This will start working once POLYBOT_DATA_HOST is configured.
+async fn fetch_remote_positions(address: &str) -> Result<HashMap<String, Decimal>> {
     let data_host = std::env::var("POLYBOT_DATA_HOST")
         .unwrap_or_else(|_| "https://data-api.polymarket.com".into());
 
-    let url = format!("{}/positions", data_host);
+    let url = format!("{}/positions?user={}", data_host, address);
     let resp = reqwest::get(&url).await;
 
     match resp {
@@ -98,13 +92,15 @@ fn compute_mismatch(
 /// compares against risk engine's tracked inventory, and halts on mismatch.
 pub fn spawn_recon(
     config: &Config,
-    client: AuthClient,
+    _client: AuthClient,
+    signer: Arc<Signer>,
     risk_engine: Arc<RiskEngine>,
 ) -> tokio::task::JoinHandle<()> {
     let interval = config.position_recon_interval;
     let nav = config.nav_usdc;
     let threshold = Decimal::from_f64_retain(nav * RECON_MISMATCH_THRESHOLD_PCT)
         .unwrap_or(Decimal::from(100));
+    let address = format!("{:#x}", signer.address());
 
     tokio::spawn(async move {
         let mut ticker = time::interval(interval);
@@ -116,7 +112,7 @@ pub fn spawn_recon(
                 continue;
             }
 
-            match fetch_remote_positions(&client).await {
+            match fetch_remote_positions(&address).await {
                 Ok(remote) => {
                     let local = risk_engine.inventory_snapshot();
 
