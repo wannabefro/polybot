@@ -168,26 +168,8 @@ fn evaluate_token_reward(
     let spread = book.spread()?;
 
     if spread.is_zero() {
+        debug!(market = %market.question, "reward: zero spread — skipping");
         return None;
-    }
-
-    // Check reward-to-spread ratio: only quote if reward density justifies spread risk.
-    // The reward daily rate is per-$1 notional; spread is the cost of a round-trip.
-    // We need reward * holding_period > spread_cost * MIN_REWARD_SPREAD_RATIO.
-    let our_spread = market.min_tick_size * Decimal::TWO;
-    if our_spread > Decimal::ZERO {
-        // Rough check: if the market's book spread is very wide relative to our
-        // quoting spread, the adverse selection risk may exceed reward income.
-        let ratio = spread / our_spread;
-        if ratio > MIN_REWARD_SPREAD_RATIO * Decimal::TWO {
-            debug!(
-                market = %market.question,
-                book_spread = %spread,
-                our_spread = %our_spread,
-                "reward: book spread too wide vs reward — skipping"
-            );
-            return None;
-        }
     }
 
     // Tight spread for reward qualification
@@ -202,6 +184,7 @@ fn evaluate_token_reward(
             bid_price = round_to_tick(mid - tight_half, market.min_tick_size);
             ask_price = round_to_tick(mid + tight_half, market.min_tick_size);
             if ask_price <= bid_price {
+                debug!(market = %market.question, "reward: can't tighten enough for max_spread");
                 return None;
             }
         }
@@ -218,6 +201,12 @@ fn evaluate_token_reward(
         size = size.min(inventory_cap_notional / mid);
     }
     if size < market.min_order_size {
+        debug!(
+            market = %market.question,
+            size = %size,
+            min = %market.min_order_size,
+            "reward: size below min_order_size"
+        );
         return None;
     }
 
