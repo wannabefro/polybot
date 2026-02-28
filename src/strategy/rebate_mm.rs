@@ -53,8 +53,10 @@ fn generate_token_quotes(
     risk: &RiskEngine,
 ) -> Option<(OrderIntent, OrderIntent)> {
     let book = books.get(&token.token_id)?;
-    let mid = book.mid_price()?;
-    let spread = book.spread()?;
+    let best_bid = book.bids.best()?.price;
+    let best_ask = book.asks.best()?.price;
+    let mid = (best_bid + best_ask) / Decimal::TWO;
+    let spread = best_ask - best_bid;
 
     // Ensure we meet rewards constraints
     let min_spread = if market.rewards_active {
@@ -79,8 +81,19 @@ fn generate_token_quotes(
         Decimal::ZERO
     };
 
-    let bid_price = round_to_tick(mid - half_spread + skew, market.min_tick_size);
-    let ask_price = round_to_tick(mid + half_spread + skew, market.min_tick_size);
+    let mut bid_price = round_to_tick(mid - half_spread + skew, market.min_tick_size);
+    let mut ask_price = round_to_tick(mid + half_spread + skew, market.min_tick_size);
+
+    // Post-only safety: clamp so we never cross the book
+    if bid_price >= best_ask {
+        bid_price = best_ask - market.min_tick_size;
+    }
+    if ask_price <= best_bid {
+        ask_price = best_bid + market.min_tick_size;
+    }
+    if bid_price <= Decimal::ZERO || ask_price <= bid_price {
+        return None;
+    }
 
     // Size: use min_order_size, rewards min_size, or base minimum — whichever is largest
     let rewards_min = market.rewards_min_size.unwrap_or(Decimal::ZERO);

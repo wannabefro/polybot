@@ -164,8 +164,10 @@ fn evaluate_token_reward(
     risk: &RiskEngine,
 ) -> Option<(OrderIntent, OrderIntent)> {
     let book = books.get(&token.token_id)?;
-    let mid = book.mid_price()?;
-    let spread = book.spread()?;
+    let best_bid = book.bids.best()?.price;
+    let best_ask = book.asks.best()?.price;
+    let mid = (best_bid + best_ask) / Decimal::TWO;
+    let spread = best_ask - best_bid;
 
     if spread.is_zero() {
         debug!(market = %market.question, "reward: zero spread — skipping");
@@ -188,6 +190,18 @@ fn evaluate_token_reward(
                 return None;
             }
         }
+    }
+
+    // Post-only safety: clamp so we never cross the book
+    if bid_price >= best_ask {
+        bid_price = best_ask - market.min_tick_size;
+    }
+    if ask_price <= best_bid {
+        ask_price = best_bid + market.min_tick_size;
+    }
+    if bid_price <= Decimal::ZERO || ask_price <= bid_price {
+        debug!(market = %market.question, "reward: can't place without crossing book");
+        return None;
     }
 
     // Use larger size for reward qualification; respect rewards_min_size

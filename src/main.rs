@@ -183,6 +183,19 @@ async fn main() -> Result<()> {
         Err(e) => warn!(err = %e, "startup: cancel-all failed (may have no open orders)"),
     }
 
+    // ── Refresh CLOB balance cache so orders aren't rejected ──
+    {
+        use polymarket_client_sdk::clob::types::AssetType;
+        use polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest;
+        let req = BalanceAllowanceRequest::builder()
+            .asset_type(AssetType::Collateral)
+            .build();
+        match auth_ctx.client.update_balance_allowance(req).await {
+            Ok(()) => info!("startup: CLOB balance cache refreshed"),
+            Err(e) => warn!(err = %e, "startup: failed to refresh CLOB balance cache"),
+        }
+    }
+
     // ── Phase 6: Live NAV tracker ──────────────────────────────
     let (_nav_handle, mut nav_rx) = ops::nav::spawn(
         auth_ctx.client.clone(),
