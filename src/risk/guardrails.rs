@@ -112,32 +112,8 @@ impl RiskEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::tests::test_config;
     use polymarket_client_sdk::clob::types::{OrderType, Side};
-    use std::time::Duration;
-
-    fn test_config() -> Config {
-        Config {
-            clob_host: String::new(),
-            gamma_host: String::new(),
-            chain_id: 137,
-            private_key: "deadbeef".into(),
-            paper_mode: true,
-            nav_usdc: 10_000.0,
-            max_notional_per_market: 0.02,  // 200 USDC
-            max_gross_exposure: 0.25,       // 2500 USDC
-            max_one_sided_inventory: 0.01,
-            daily_loss_stop: 0.03,          // 300 USDC
-            heartbeat_interval: Duration::from_secs(5),
-            geoblock_poll_interval: Duration::from_secs(900),
-            discovery_interval: Duration::from_secs(60),
-            position_recon_interval: Duration::from_secs(45),
-            stale_feed_threshold: Duration::from_millis(1500),
-            mean_revert_max_nav_frac: 0.005,
-            mean_revert_min_volume_24h: 10_000.0,
-            hedge_timeout: Duration::from_millis(500),
-        }
-    }
 
     fn test_intent(price: f64, size: f64) -> OrderIntent {
         OrderIntent {
@@ -160,13 +136,10 @@ mod tests {
     #[test]
     fn rejected_per_market_limit() {
         let engine = RiskEngine::new(test_config());
-        // Fill up to near limit
         engine.record_fill("cond1", Decimal::from(190));
-        // 10 USDC more is fine (190 + 5 = 195 < 200)
-        let verdict = engine.check("cond1", &test_intent(0.50, 10.0)); // 5 USDC
+        let verdict = engine.check("cond1", &test_intent(0.50, 10.0));
         assert!(matches!(verdict, RiskVerdict::Approved));
-        // But 30 USDC pushes over (190 + 15 = 205 > 200)
-        let verdict = engine.check("cond1", &test_intent(0.50, 30.0)); // 15 USDC → 205 > 200
+        let verdict = engine.check("cond1", &test_intent(0.50, 30.0));
         assert!(matches!(verdict, RiskVerdict::Rejected(_)));
     }
 
@@ -181,8 +154,75 @@ mod tests {
     #[test]
     fn daily_loss_stop() {
         let engine = RiskEngine::new(test_config());
-        engine.record_pnl(Decimal::from(-301)); // > 300 loss limit
+        engine.record_pnl(Decimal::from(-301));
         let verdict = engine.check("cond1", &test_intent(0.50, 1.0));
         assert!(matches!(verdict, RiskVerdict::Rejected(_)));
+    }
+
+    #[test]
+    fn gross_exposure_limit() {
+        let engine = RiskEngine::new(test_config());
+        // Fill 12 markets to 200 each = 2400, under 2500 limit
+        for i in 0..12 {
+            engine.record_fill(&format!("cond{i}"), Decimal::from(200));
+        }
+        // 13th market with 200 would be 2600 > 2500
+        let verdict = engine.check("cond_new", &test_intent(1.0, 200.0));
+        assert!(matches!(verdict, RiskVerdict::Rejected(_)));
+    }
+
+    #[test]
+    fn separate_markets_have_separate_limits() {
+        let engine = RiskEngine::new(test_config());
+        engine.record_fill("cond1", Decimal::from(190));
+        // cond2 has no exposure, should pass easily
+        let verdict = engine.check("cond2", &test_intent(0.50, 100.0));
+        assert!(matches!(verdict, RiskVerdict::Approved));
+    }
+
+    #[test]
+    fn daily_pnl_accumulates() {
+        let engine = RiskEngine::new(test_config());
+        engine.record_pnl(Decimal::from(-100));
+        engine.record_pnl(Decimal::from(-100));
+        // -200 is still within -300 limit
+        let verdict = engine.check("cond1", &test_intent(0.50, 1.0));
+        assert!(matches!(verdict, RiskVerdict::Approved));
+
+        engine.record_pnl(Decimal::from(-101));
+        // -301 exceeds limit
+        let verdict = engine.check("cond1", &test_intent(0.50, 1.0));
+        assert!(matches!(verdict, RiskVerdict::Rejected(_)));
+    }
+
+    #[test]
+    fn reset_daily_clears_pnl() {
+        let engine = RiskEngine::new(test_config());
+        engine.record_pnl(Decimal::from(-301));
+        assert!(matches!(
+            engine.check("cond1", &test_intent(0.50, 1.0)),
+            RiskVerdict::Rejected(_)
+        ));
+
+        engine.reset_daily();
+        assert!(matches!(
+            engine.check("cond1", &test_intent(0.50, 1.0)),
+            RiskVerdict::Approved
+        ));
+    }
+
+    #[test]
+    fn halt_and_check_is_halted() {
+        let engine = RiskEngine::new(test_config());
+        assert!(!engine.is_halted());
+        engine.halt("test");
+        assert!(engine.is_halted());
+    }
+
+    #[test]
+    fn zero_notional_order_passes() {
+        let engine = RiskEngine::new(test_config());
+        let verdict = engine.check("cond1", &test_intent(0.0, 10.0));
+        assert!(matches!(verdict, RiskVerdict::Approved));
     }
 }

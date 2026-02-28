@@ -86,14 +86,14 @@ fn env_or(key: &str, default: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    #[test]
-    fn nav_limit_calculation() {
-        let cfg = Config {
-            clob_host: String::new(),
-            gamma_host: String::new(),
+    /// Shared test config used across all modules.
+    pub fn test_config() -> Config {
+        Config {
+            clob_host: "https://clob.polymarket.com".into(),
+            gamma_host: "https://gamma-api.polymarket.com".into(),
             chain_id: 137,
             private_key: "deadbeef".into(),
             paper_mode: true,
@@ -110,8 +110,80 @@ mod tests {
             mean_revert_max_nav_frac: 0.005,
             mean_revert_min_volume_24h: 10_000.0,
             hedge_timeout: Duration::from_millis(500),
-        };
+        }
+    }
+
+    #[test]
+    fn nav_limit_calculation() {
+        let cfg = test_config();
         assert!((cfg.nav_limit(0.02) - 200.0).abs() < f64::EPSILON);
         assert!((cfg.nav_limit(0.25) - 2500.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn nav_limit_zero_fraction() {
+        let cfg = test_config();
+        assert!((cfg.nav_limit(0.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn nav_limit_full_nav() {
+        let cfg = test_config();
+        assert!((cfg.nav_limit(1.0) - 10_000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn from_env_requires_private_key() {
+        // Ensure POLYBOT_PRIVATE_KEY is not set
+        std::env::remove_var("POLYBOT_PRIVATE_KEY");
+        let result = Config::from_env();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("POLYBOT_PRIVATE_KEY"),
+            "error should mention the missing env var"
+        );
+    }
+
+    #[test]
+    fn from_env_with_private_key() {
+        // This test sets and then cleans up the env var
+        std::env::set_var("POLYBOT_PRIVATE_KEY", "0xdeadbeef");
+        let result = Config::from_env();
+        std::env::remove_var("POLYBOT_PRIVATE_KEY");
+        let cfg = result.unwrap();
+        assert_eq!(cfg.private_key, "0xdeadbeef");
+        assert!(cfg.paper_mode); // default is true
+        assert_eq!(cfg.chain_id, 137);
+    }
+
+    #[test]
+    fn env_or_returns_default() {
+        let val = env_or("POLYBOT_NONEXISTENT_VAR_12345", "fallback");
+        assert_eq!(val, "fallback");
+    }
+
+    #[test]
+    fn env_or_returns_env_value() {
+        std::env::set_var("POLYBOT_TEST_VAR_99", "custom_value");
+        let val = env_or("POLYBOT_TEST_VAR_99", "fallback");
+        std::env::remove_var("POLYBOT_TEST_VAR_99");
+        assert_eq!(val, "custom_value");
+    }
+
+    #[test]
+    fn default_hosts_are_production() {
+        let cfg = test_config();
+        assert!(cfg.clob_host.contains("polymarket.com"));
+        assert!(cfg.gamma_host.contains("polymarket.com"));
+    }
+
+    #[test]
+    fn default_risk_limits_match_plan() {
+        let cfg = test_config();
+        assert_eq!(cfg.max_notional_per_market, 0.02); // 2%
+        assert_eq!(cfg.max_gross_exposure, 0.25);       // 25%
+        assert_eq!(cfg.max_one_sided_inventory, 0.01);  // 1%
+        assert_eq!(cfg.daily_loss_stop, 0.03);           // 3%
+        assert_eq!(cfg.mean_revert_max_nav_frac, 0.005); // 0.5%
     }
 }
