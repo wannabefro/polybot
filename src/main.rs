@@ -447,6 +447,9 @@ async fn main() -> Result<()> {
                             rebate_intents.push((ask, market.condition_id.clone(), false, ask_key));
                         }
                     }
+                    if rebate_intents.is_empty() && mm_count > 0 {
+                        info!(mm_markets_with_books = mm_count, "rebate-mm: markets had books but no quotable intents");
+                    }
                     let results: Vec<_> = futures::future::join_all(
                         rebate_intents.iter().map(|(intent, _, _, _)| router.place(intent, &books))
                     ).await;
@@ -691,6 +694,7 @@ async fn main() -> Result<()> {
                     .flat_map(|m| m.tokens.iter())
                     .filter(|t| books.get(&t.token_id).is_some())
                     .count();
+                let books_quotable = books.count_quotable();
                 let books_total = universe.iter()
                     .map(|m| m.tokens.len())
                     .sum::<usize>();
@@ -701,7 +705,7 @@ async fn main() -> Result<()> {
                 info!(
                     nav = format!("{live_nav:.2}"),
                     markets = universe.len(),
-                    books = %format!("{}/{}", books_populated, books_total),
+                    books = %format!("{}/{}/{}", books_quotable, books_populated, books_total),
                     active_quotes = active_quotes.len(),
                     quotes_sent = s.quotes_sent,
                     fills = s.fills_count,

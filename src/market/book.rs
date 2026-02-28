@@ -142,6 +142,16 @@ impl BookStore {
             .collect()
     }
 
+    /// Count how many books have a valid mid price (both bids and asks).
+    pub fn count_quotable(&self) -> usize {
+        self.inner.read().values().filter(|b| b.mid_price().is_some()).count()
+    }
+
+    /// Total number of tracked books.
+    pub fn count(&self) -> usize {
+        self.inner.read().len()
+    }
+
     /// Remove books for assets no longer in the universe.
     #[allow(dead_code)]
     pub fn retain(&self, asset_ids: &[String]) {
