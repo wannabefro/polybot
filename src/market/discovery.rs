@@ -49,7 +49,7 @@ fn passes_filter(
 /// Fetch all active markets from the CLOB endpoint, paginating through cursors.
 async fn fetch_all_markets(client: &AuthClient, gamma_host: &str) -> Result<Vec<TradableMarket>> {
     let mut results = Vec::new();
-    let mut cursor: Option<String> = Some("0".into());
+    let mut cursor: Option<String> = None;
 
     loop {
         let page = client.markets(cursor).await?;
