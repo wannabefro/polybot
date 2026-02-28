@@ -12,6 +12,7 @@ use tracing::{debug, warn};
 #[derive(Debug, Clone)]
 pub struct Level {
     pub price: Decimal,
+    #[allow(dead_code)]
     pub size: Decimal,
 }
 
@@ -30,10 +31,12 @@ impl BookSide {
 /// Local orderbook for a single asset/token.
 #[derive(Debug, Clone)]
 pub struct LocalBook {
+    #[allow(dead_code)]
     pub asset_id: String,
     pub bids: BookSide,
     pub asks: BookSide,
     pub last_update: Instant,
+    #[allow(dead_code)]
     pub hash: Option<String>,
     pub timestamp_ms: i64,
 }
@@ -130,6 +133,7 @@ impl BookStore {
     }
 
     /// Get mid prices for all tracked assets.
+    #[allow(dead_code)]
     pub fn all_mids(&self) -> HashMap<String, Decimal> {
         self.inner
             .read()
@@ -139,11 +143,13 @@ impl BookStore {
     }
 
     /// Remove books for assets no longer in the universe.
+    #[allow(dead_code)]
     pub fn retain(&self, asset_ids: &[String]) {
         self.inner.write().retain(|k, _| asset_ids.contains(k));
     }
 
     /// Pause quoting (set on WS reconnect).
+    #[allow(dead_code)]
     pub fn pause(&self) {
         self.paused.store(true, Ordering::Relaxed);
         warn!("book: paused — awaiting resync");
@@ -160,11 +166,13 @@ impl BookStore {
     }
 
     /// Check if any tracked book has a stale feed.
+    #[allow(dead_code)]
     pub fn any_stale(&self, threshold: std::time::Duration) -> bool {
         self.inner.read().values().any(|b| b.is_stale(threshold))
     }
 
     /// Return the stored hash from the last book update for a given token.
+    #[allow(dead_code)]
     pub fn hash(&self, token_id: &str) -> Option<String> {
         self.inner.read().get(token_id).and_then(|b| b.hash.clone())
     }

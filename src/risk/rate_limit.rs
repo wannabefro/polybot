@@ -23,6 +23,7 @@ struct Bucket {
     /// Sustained (long-term) refill rate in tokens/sec.
     sustained_rate: f64,
     /// Burst capacity — extra tokens allowed for short bursts.
+    #[allow(dead_code)]
     burst_capacity: u32,
     last_refill: Instant,
 }
@@ -46,6 +47,7 @@ impl RateLimiter {
     }
 
     /// Create with explicit burst capacity.
+    #[allow(dead_code)]
     pub fn with_burst(max_per_sec: f64, burst_capacity: u32) -> Arc<Self> {
         let effective = max_per_sec * 0.7;
         Arc::new(Self {
@@ -62,6 +64,7 @@ impl RateLimiter {
     }
 
     /// Record a 429/425 response — sets exponential backoff with jitter.
+    #[allow(dead_code)]
     pub fn record_429(&self) {
         let mut count = self.backoff_count.lock();
         *count = (*count + 1).min(8); // cap exponent
@@ -72,6 +75,7 @@ impl RateLimiter {
     }
 
     /// Check if we're currently in a backoff period.
+    #[allow(dead_code)]
     pub fn is_backed_off(&self) -> bool {
         self.backoff_until
             .read()
@@ -79,6 +83,7 @@ impl RateLimiter {
     }
 
     /// Try to acquire one token. Returns Ok(()) or Err with wait duration.
+    #[allow(dead_code)]
     pub fn try_acquire(&self) -> Result<(), Duration> {
         // Check backoff first
         if let Some(until) = *self.backoff_until.read() {
@@ -106,6 +111,7 @@ impl RateLimiter {
     }
 
     /// Acquire, blocking if necessary.
+    #[allow(dead_code)]
     pub async fn acquire(&self) {
         loop {
             match self.try_acquire() {

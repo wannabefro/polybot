@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use futures::StreamExt;
 use polymarket_client_sdk::clob::ws::{Client as WsClient, types::response::BookUpdate};
 use polymarket_client_sdk::types::U256;
@@ -28,7 +27,7 @@ pub fn spawn(
     config: &Config,
     universe_rx: watch::Receiver<Arc<Vec<TradableMarket>>>,
 ) -> (tokio::task::JoinHandle<()>, mpsc::UnboundedReceiver<FeedEvent>) {
-    let stale_threshold = config.stale_feed_threshold;
+    let _stale_threshold = config.stale_feed_threshold;
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
     let handle = tokio::spawn(async move {

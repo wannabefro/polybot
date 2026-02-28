@@ -1,4 +1,3 @@
-use std::sync::Arc;
 
 use anyhow::Result;
 use polymarket_client_sdk::clob::types::{OrderType, Side};
@@ -25,6 +24,7 @@ pub struct OrderIntent {
 
 /// Result of submitting an order.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OrderResult {
     pub order_id: String,
     pub intent: OrderIntent,
@@ -86,6 +86,7 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
 }
 
 /// Cancel a specific order.
+#[allow(dead_code)]
 pub async fn cancel(client: &AuthClient, order_id: &str) -> Result<()> {
     client.cancel_order(order_id).await?;
     info!(order_id, "order: cancelled");

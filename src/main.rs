@@ -9,13 +9,10 @@ mod intelligence;
 mod ops;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use polymarket_client_sdk::clob::types::Side;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use tokio::time;
 use tracing::{error, info, warn};
 
@@ -24,7 +21,7 @@ use crate::market::book::BookStore;
 use crate::market::ws::FeedEvent;
 use crate::ops::metrics::Metrics;
 use crate::order::router::OrderRouter;
-use crate::risk::guardrails::{RiskEngine, RiskVerdict};
+use crate::risk::guardrails::RiskEngine;
 use crate::strategy::mean_revert::MeanRevertState;
 use crate::strategy::reward::{HedgeTracker, UnhedgedFill};
 
@@ -84,6 +81,13 @@ fn process_fill(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install rustls crypto provider before any TLS connections.
+    // Both ring and aws-lc-rs features are pulled in transitively;
+    // we pick ring explicitly to avoid the ambiguity panic.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

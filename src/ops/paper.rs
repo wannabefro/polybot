@@ -11,6 +11,7 @@ use crate::order::pipeline::OrderIntent;
 /// Simulated fill for paper trading.
 #[derive(Debug, Clone)]
 pub struct PaperFill {
+    #[allow(dead_code)]
     pub paper_order_id: String,
     pub token_id: String,
     pub side: String,
@@ -100,6 +101,7 @@ impl PaperEngine {
     }
 
     /// Cancel a paper order.
+    #[allow(dead_code)]
     pub fn cancel_order(&self, order_id: &str) -> bool {
         self.open_orders.write().remove(order_id).is_some()
     }
@@ -114,16 +116,19 @@ impl PaperEngine {
     }
 
     /// Get all fills.
+    #[allow(dead_code)]
     pub fn fills(&self) -> Vec<PaperFill> {
         self.fills.read().clone()
     }
 
     /// Get open order count.
+    #[allow(dead_code)]
     pub fn open_order_count(&self) -> usize {
         self.open_orders.read().len()
     }
 
     /// Total paper P&L (simplified: sum of buy notionals as negative, sell as positive).
+    #[allow(dead_code)]
     pub fn net_notional(&self) -> Decimal {
         self.fills
             .read()

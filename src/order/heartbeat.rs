@@ -10,12 +10,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
-use tracing::{info, warn};
 
-use crate::ops::metrics::Metrics;
 
 /// Heartbeat health monitor — tracks the last known heartbeat success.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct HeartbeatMonitor {
     last_success: RwLock<Instant>,
     interval: Duration,
@@ -51,26 +50,31 @@ impl HeartbeatMonitor {
     }
 
     /// Set the rolling heartbeat ID (returned by server).
+    #[allow(dead_code)]
     pub fn set_id(&self, id: String) {
         *self.heartbeat_id.write() = Some(id);
     }
 
     /// Get the current heartbeat ID.
+    #[allow(dead_code)]
     pub fn id(&self) -> Option<String> {
         self.heartbeat_id.read().clone()
     }
 
     /// Record a heartbeat failure (increments consecutive failure count).
+    #[allow(dead_code)]
     pub fn record_failure(&self) {
         self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get consecutive failure count.
+    #[allow(dead_code)]
     pub fn failure_count(&self) -> u32 {
         self.consecutive_failures.load(Ordering::Relaxed)
     }
 
     /// Reset failure count (on successful heartbeat).
+    #[allow(dead_code)]
     pub fn reset_failures(&self) {
         self.consecutive_failures.store(0, Ordering::Relaxed);
     }

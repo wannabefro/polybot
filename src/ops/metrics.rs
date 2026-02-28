@@ -34,6 +34,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    #[allow(dead_code)]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             quotes_sent: AtomicU64::new(0),
@@ -55,66 +56,82 @@ impl Metrics {
         })
     }
 
+    #[allow(dead_code)]
     pub fn inc_quotes_sent(&self) {
         self.quotes_sent.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn inc_quotes_cancelled(&self) {
         self.quotes_cancelled.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn inc_fills(&self) {
         self.fills_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn inc_cancel_failures(&self) {
         self.cancel_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn inc_risk_rejections(&self) {
         self.risk_rejections.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn inc_ws_reconnects(&self) {
         self.ws_reconnects.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn inc_llm_calls(&self) {
         self.llm_calls.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn inc_llm_timeouts(&self) {
         self.llm_timeouts.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn update_pnl(&self, pnl: Decimal) {
         *self.daily_pnl.write() = pnl;
     }
 
+    #[allow(dead_code)]
     pub fn add_rebate(&self, amount: Decimal) {
         *self.rebate_accrual.write() += amount;
     }
 
+    #[allow(dead_code)]
     pub fn inc_fill_rate_numerator(&self) {
         self.fill_rate_numerator.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn update_cancel_latency_us(&self, us: u64) {
         self.cancel_latency_us.store(us, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn update_heartbeat_age_ms(&self, ms: u64) {
         self.heartbeat_age_ms.store(ms, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn inc_throttle_count(&self) {
         self.throttle_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn add_slippage(&self, amount: Decimal) {
         *self.slippage_total.write() += amount;
     }
 
+    #[allow(dead_code)]
     pub fn update_quote_age_ms(&self, ms: u64) {
         self.quote_age_ms.store(ms, Ordering::Relaxed);
     }

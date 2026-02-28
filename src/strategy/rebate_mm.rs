@@ -1,4 +1,3 @@
-use std::sync::Arc;
 
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use rust_decimal::Decimal;
@@ -13,6 +12,7 @@ use crate::risk::guardrails::{RiskEngine, RiskVerdict};
 
 /// Parameters for a single quoting cycle on one market.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct QuoteParams {
     pub min_spread: Decimal,
     pub min_size: Decimal,

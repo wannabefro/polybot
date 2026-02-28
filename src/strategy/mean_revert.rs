@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::config::Config;
 use crate::market::book::BookStore;
@@ -70,6 +70,7 @@ impl PriceTracker {
         self.samples.len() >= 10
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.samples.len()
     }
@@ -177,11 +178,13 @@ impl MeanRevertState {
         self.positions.retain(|p| p.token_id != token_id);
     }
 
+    #[allow(dead_code)]
     pub fn open_positions(&self) -> &[MeanRevertPosition] {
         &self.positions
     }
 
     /// Clean up trackers for tokens no longer in the universe.
+    #[allow(dead_code)]
     pub fn retain_tokens(&mut self, active_tokens: &[String]) {
         self.trackers.retain(|k, _| active_tokens.contains(k));
     }

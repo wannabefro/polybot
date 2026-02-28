@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
 
 /// Risk signal emitted by the LLM intelligence loop.
 ///
@@ -38,6 +37,7 @@ impl Default for RiskSignal {
 
 impl RiskSignal {
     /// Check if this signal has expired based on its TTL.
+    #[allow(dead_code)]
     pub fn is_expired(&self) -> bool {
         match self.created_at {
             Some(t) => t.elapsed() > Duration::from_millis(self.ttl_ms),
@@ -47,6 +47,7 @@ impl RiskSignal {
 
     /// Effective risk multiplier, accounting for expiry and pull.
     /// Returns 0.0 if pull is true, reverts to 1.0 if expired.
+    #[allow(dead_code)]
     pub fn effective_multiplier(&self) -> f64 {
         if self.pull {
             return 0.0;

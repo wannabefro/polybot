@@ -8,7 +8,7 @@ use polymarket_client_sdk::clob::types::{OrderType, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::config::Config;
 use crate::market::book::BookStore;
@@ -24,6 +24,7 @@ const MIN_REWARD_SPREAD_RATIO: Decimal = dec!(1.5);
 pub struct UnhedgedFill {
     pub token_id: String,
     pub side: Side,
+    #[allow(dead_code)]
     pub price: Decimal,
     pub size: Decimal,
     pub filled_at: Instant,
@@ -91,6 +92,7 @@ impl HedgeTracker {
     }
 
     /// Get fills that have breached their hedge SLA.
+    #[allow(dead_code)]
     pub fn breached_fills(&self) -> Vec<&UnhedgedFill> {
         self.unhedged
             .iter()
@@ -113,6 +115,7 @@ impl HedgeTracker {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub fn unhedged_count(&self) -> usize {
         self.unhedged.len()
     }

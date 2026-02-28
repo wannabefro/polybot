@@ -9,10 +9,10 @@ use tracing::{error, info, warn};
 use crate::auth::{AuthClient, Signer};
 use crate::config::Config;
 use crate::risk::guardrails::RiskEngine;
-use polymarket_client_sdk::auth::Signer as SignerTrait;
 
 /// Snapshot of reconciled positions.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct PositionSnapshot {
     /// condition_id → net size
     pub positions: HashMap<String, Decimal>,

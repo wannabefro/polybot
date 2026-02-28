@@ -4,9 +4,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::time;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use crate::config::Config;
 use crate::intelligence::signal::{RiskSignal, SignalSender};
 
 /// Raw LLM response (strict schema enforced by prompt).

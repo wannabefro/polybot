@@ -1,12 +1,12 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
+use futures::StreamExt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::time;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::auth::AuthClient;
 use crate::config::Config;
@@ -49,70 +49,61 @@ fn passes_filter(
 /// Fetch all active markets from the CLOB endpoint, paginating through cursors.
 async fn fetch_all_markets(client: &AuthClient, gamma_host: &str) -> Result<Vec<TradableMarket>> {
     let mut results = Vec::new();
-    let mut cursor: Option<String> = None;
 
-    loop {
-        let page = client.markets(cursor).await?;
-
-        for m in &page.data {
-            if !passes_filter(m.active, m.closed, m.accepting_orders, m.minimum_tick_size) {
-                continue;
-            }
-
-            let condition_id = match &m.condition_id {
-                Some(id) => format!("{id:?}"),
-                None => continue,
-            };
-
-            let mut tokens: Vec<TokenInfo> = m
-                .tokens
-                .iter()
-                .map(|t| TokenInfo {
-                    token_id: t.token_id.to_string(),
-                    outcome: t.outcome.clone(),
-                    price: t.price,
-                })
-                .collect();
-
-            // Exclude "Other" outcomes from neg-risk markets (catch-all bucket, not tradable)
-            if m.neg_risk {
-                tokens.retain(|t| t.outcome != "Other");
-            }
-
-            let rewards_max_spread = if m.rewards.max_spread > Decimal::ZERO {
-                Some(m.rewards.max_spread)
-            } else {
-                None
-            };
-            let rewards_min_size = if m.rewards.min_size > Decimal::ZERO {
-                Some(m.rewards.min_size)
-            } else {
-                None
-            };
-
-            results.push(TradableMarket {
-                condition_id,
-                question: m.question.clone(),
-                tokens,
-                neg_risk: m.neg_risk,
-                neg_risk_market_id: m.neg_risk_market_id.map(|id| format!("{id:?}")),
-                min_tick_size: m.minimum_tick_size,
-                min_order_size: m.minimum_order_size,
-                maker_fee_bps: m.maker_base_fee,
-                rewards_active: m.rewards.rates.iter().any(|r| r.rewards_daily_rate > Decimal::ZERO),
-                rewards_max_spread,
-                rewards_min_size,
-                // volume_24h not available from CLOB API; enriched via Gamma API later
-                volume_24h: 0.0,
-                tags: m.tags.clone(),
-            });
+    let mut stream = Box::pin(client.stream_data(|c, cursor| c.markets(cursor)));
+    while let Some(maybe_market) = stream.next().await {
+        let m = maybe_market?;
+        if !passes_filter(m.active, m.closed, m.accepting_orders, m.minimum_tick_size) {
+            continue;
         }
 
-        // "DONE" sentinel or empty cursor means no more pages
-        if page.next_cursor == "DONE" || page.next_cursor.is_empty() {
-            break;
+        let condition_id = match &m.condition_id {
+            Some(id) => format!("{id:?}"),
+            None => continue,
+        };
+
+        let mut tokens: Vec<TokenInfo> = m
+            .tokens
+            .iter()
+            .map(|t| TokenInfo {
+                token_id: t.token_id.to_string(),
+                outcome: t.outcome.clone(),
+                price: t.price,
+            })
+            .collect();
+
+        // Exclude "Other" outcomes from neg-risk markets (catch-all bucket, not tradable)
+        if m.neg_risk {
+            tokens.retain(|t| t.outcome != "Other");
         }
-        cursor = Some(page.next_cursor);
+
+        let rewards_max_spread = if m.rewards.max_spread > Decimal::ZERO {
+            Some(m.rewards.max_spread)
+        } else {
+            None
+        };
+        let rewards_min_size = if m.rewards.min_size > Decimal::ZERO {
+            Some(m.rewards.min_size)
+        } else {
+            None
+        };
+
+        results.push(TradableMarket {
+            condition_id,
+            question: m.question.clone(),
+            tokens,
+            neg_risk: m.neg_risk,
+            neg_risk_market_id: m.neg_risk_market_id.map(|id| format!("{id:?}")),
+            min_tick_size: m.minimum_tick_size,
+            min_order_size: m.minimum_order_size,
+            maker_fee_bps: m.maker_base_fee,
+            rewards_active: m.rewards.rates.iter().any(|r| r.rewards_daily_rate > Decimal::ZERO),
+            rewards_max_spread,
+            rewards_min_size,
+            // volume_24h not available from CLOB API; enriched via Gamma API later
+            volume_24h: 0.0,
+            tags: m.tags.clone(),
+        });
     }
 
     enrich_volume(gamma_host, &mut results).await;

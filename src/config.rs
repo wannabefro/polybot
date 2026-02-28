@@ -106,6 +106,7 @@ fn env_or(key: &str, default: &str) -> String {
 /// Build a Config with safe defaults for testing (no env vars needed).
 /// Available in both unit and integration tests.
 #[doc(hidden)]
+#[allow(dead_code)]
 pub fn test_config() -> Config {
     Config {
         clob_host: "https://clob.polymarket.com".into(),

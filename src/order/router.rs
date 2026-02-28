@@ -9,10 +9,11 @@ use crate::auth::AuthContext;
 use crate::config::Config;
 use crate::market::book::BookStore;
 use crate::ops::paper::{PaperEngine, PaperFill};
-use crate::order::pipeline::{self, OrderIntent, OrderResult};
+use crate::order::pipeline::{self, OrderIntent};
 
 /// Result of placing an order through the router.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PlaceResult {
     pub order_id: String,
     /// If the paper engine filled immediately, this is Some.
@@ -66,6 +67,7 @@ impl OrderRouter {
     }
 
     /// Cancel a specific order.
+    #[allow(dead_code)]
     pub async fn cancel(&self, order_id: &str) -> Result<()> {
         match self {
             Self::Paper(engine) => {
@@ -89,6 +91,7 @@ impl OrderRouter {
     }
 
     /// Get the paper engine reference (for metrics/inspection in paper mode).
+    #[allow(dead_code)]
     pub fn paper_engine(&self) -> Option<&Arc<PaperEngine>> {
         match self {
             Self::Paper(engine) => Some(engine),

@@ -154,6 +154,7 @@ impl RiskEngine {
     }
 
     /// Record realized P&L.
+    #[allow(dead_code)]
     pub fn record_pnl(&self, amount: Decimal) {
         *self.daily_pnl.write() += amount;
     }
