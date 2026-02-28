@@ -55,6 +55,13 @@ fn scale_intent_size(
     true
 }
 
+fn is_transient_order_rejection(msg: &str) -> bool {
+    msg.contains("crosses book")
+        || msg.contains("invalid post-only order")
+        || msg.contains("not enough balance")
+        || msg.contains("allowance")
+}
+
 /// Helper: process a PlaceResult, recording fills in risk engine and hedge tracker.
 /// Works for both paper mode (paper_fill) and live mode (live_matched).
 fn process_fill(
@@ -497,7 +504,14 @@ async fn main() -> Result<()> {
                                 }
                                 risk_engine.reset_cancel_failures();
                             }
-                            Err(e) => error!(err = %e, "rebate-mm place failed"),
+                            Err(e) => {
+                                let msg = e.to_string();
+                                if is_transient_order_rejection(&msg) {
+                                    warn!(err = %e, "rebate-mm place rejected (transient)");
+                                } else {
+                                    error!(err = %e, "rebate-mm place failed");
+                                }
+                            }
                         }
                     }
                 }
@@ -583,7 +597,7 @@ async fn main() -> Result<()> {
                             }
                             Err(e) => {
                                 let msg = e.to_string();
-                                if msg.contains("crosses book") || msg.contains("not enough balance") {
+                                if is_transient_order_rejection(&msg) {
                                     warn!(err = %e, "reward place rejected (transient)");
                                 } else {
                                     error!(err = %e, "reward place failed");

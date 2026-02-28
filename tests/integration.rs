@@ -82,6 +82,7 @@ async fn paper_pipeline_rebate_mm_tick() {
 
     let market = make_market(false, 50_000.0);
     seed_book(&books, "token_yes", "0.48", "0.52");
+    seed_book(&books, "token_no", "0.48", "0.52");
 
     // Generate quotes
     let quotes = strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk);
@@ -89,7 +90,7 @@ async fn paper_pipeline_rebate_mm_tick() {
 
     let (bid, ask) = &quotes[0];
     assert!(matches!(bid.side, Side::Buy));
-    assert!(matches!(ask.side, Side::Sell));
+    assert!(matches!(ask.side, Side::Buy)); // complement buy, not sell
     assert!(bid.post_only);
     assert!(ask.post_only);
 
@@ -117,6 +118,7 @@ async fn paper_pipeline_reward_tick() {
 
     let market = make_market(true, 50_000.0);
     seed_book(&books, "token_yes", "0.48", "0.52");
+    seed_book(&books, "token_no", "0.48", "0.52");
 
     let quotes = strategy::reward::evaluate_reward_quote(&cfg, &market, &books, &risk);
     assert!(!quotes.is_empty(), "reward market should produce quotes");

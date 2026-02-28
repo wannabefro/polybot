@@ -20,9 +20,10 @@ pub struct QuoteParams {
     pub skew_factor: Decimal,
 }
 
-/// Generate two-sided quotes for each outcome in a tradable market.
+/// Generate two-sided quotes for a tradable market using BUY orders only.
 ///
-/// Returns a Vec of (bid_intent, ask_intent) pairs — one per quotable token.
+/// For binary markets (2 tokens): BUY token0 at bid + BUY token1 at complement.
+/// We cannot SELL tokens we don't hold — the CLOB rejects with "not enough balance".
 pub fn generate_quotes(
     config: &Config,
     market: &TradableMarket,
@@ -33,69 +34,99 @@ pub fn generate_quotes(
         return Vec::new();
     }
 
-    let mut pairs = Vec::new();
-
-    for token in &market.tokens {
-        if let Some(pair) = generate_token_quotes(config, market, token, books, risk) {
-            pairs.push(pair);
+    // For binary markets, generate buy/buy-complement pair
+    if market.tokens.len() == 2 {
+        if let Some(pair) = generate_binary_quotes(config, market, books, risk) {
+            return vec![pair];
         }
+        return Vec::new();
     }
 
-    pairs
+    // Multi-outcome: just place buy orders on each token
+    let mut intents = Vec::new();
+    for token in &market.tokens {
+        if let Some(intent) = generate_single_buy(config, market, token, books, risk) {
+            intents.push((intent.clone(), intent));
+        }
+    }
+    intents
 }
 
-/// Generate bid/ask quotes for a single token within a market.
-fn generate_token_quotes(
+/// Binary market: BUY token0 at bid + BUY token1 at complement of ask.
+fn generate_binary_quotes(
     config: &Config,
     market: &TradableMarket,
-    token: &crate::market::discovery::TokenInfo,
     books: &BookStore,
     risk: &RiskEngine,
 ) -> Option<(OrderIntent, OrderIntent)> {
-    let book = books.get(&token.token_id)?;
-    let best_bid = book.bids.best()?.price;
-    let best_ask = book.asks.best()?.price;
-    let mid = (best_bid + best_ask) / Decimal::TWO;
-    let spread = best_ask - best_bid;
+    let t0 = &market.tokens[0];
+    let t1 = &market.tokens[1];
 
-    // Ensure we meet rewards constraints
+    let book0 = books.get(&t0.token_id)?;
+    let best_bid0 = book0.bids.best()?.price;
+    let best_ask0 = book0.asks.best()?.price;
+    let mid = (best_bid0 + best_ask0) / Decimal::TWO;
+    let spread = best_ask0 - best_bid0;
+
+    if spread <= Decimal::ZERO {
+        return None;
+    }
+
+    let tick = market.min_tick_size;
     let min_spread = if market.rewards_active {
-        // Use a tighter spread to qualify for rewards
-        market.min_tick_size * dec!(2)
+        tick * dec!(2)
     } else {
-        market.min_tick_size * dec!(4)
+        tick * dec!(4)
     };
-
     let half_spread = (spread / dec!(2)).max(min_spread);
 
-    // Inventory skew: shift quotes away from concentrated side
-    // Positive inventory (long) → negative skew (lower bid/ask to reduce longs)
-    // Negative inventory (short) → positive skew (raise bid/ask to reduce shorts)
-    let inventory = risk.token_inventory(&token.token_id);
+    // Inventory skew
+    let inventory = risk.token_inventory(&t0.token_id);
     let skew = if !inventory.is_zero() {
-        let skew_factor = dec!(0.001); // 10 bps per unit of inventory
-        let raw = -(inventory * skew_factor);
+        let raw = -(inventory * dec!(0.001));
         let bound = half_spread / dec!(2);
         raw.clamp(-bound, bound)
     } else {
         Decimal::ZERO
     };
 
-    let mut bid_price = round_to_tick(mid - half_spread + skew, market.min_tick_size);
-    let mut ask_price = round_to_tick(mid + half_spread + skew, market.min_tick_size);
+    let mut bid_price = round_to_tick(mid - half_spread + skew, tick);
 
-    // Post-only safety: clamp so we never cross the book
-    if bid_price >= best_ask {
-        bid_price = best_ask - market.min_tick_size;
+    // The "ask" on token0 is BUY on token1 at complement price
+    let ask_on_t0 = round_to_tick(mid + half_spread + skew, tick);
+    let mut complement_price = round_to_tick(Decimal::ONE - ask_on_t0, tick);
+
+    // Enforce max spread
+    if let Some(max_spread) = market.rewards_max_spread {
+        if (ask_on_t0 - bid_price) > max_spread {
+            let tight_half = max_spread / dec!(2);
+            bid_price = round_to_tick(mid - tight_half + skew, tick);
+            let tight_ask = round_to_tick(mid + tight_half + skew, tick);
+            complement_price = round_to_tick(Decimal::ONE - tight_ask, tick);
+        }
     }
-    if ask_price <= best_bid {
-        ask_price = best_bid + market.min_tick_size;
+
+    // Post-only safety: bid must not cross token0 book
+    if bid_price >= best_ask0 {
+        bid_price = best_ask0 - tick;
     }
-    if bid_price <= Decimal::ZERO || ask_price <= bid_price {
+    if bid_price <= Decimal::ZERO {
         return None;
     }
 
-    // Size: use min_order_size, rewards min_size, or base minimum — whichever is largest
+    // Clamp complement against token1 book if available
+    if let Some(book1) = books.get(&t1.token_id) {
+        if let Some(best_ask1) = book1.asks.best() {
+            if complement_price >= best_ask1.price {
+                complement_price = best_ask1.price - tick;
+            }
+        }
+    }
+    if complement_price <= Decimal::ZERO {
+        return None;
+    }
+
+    // Size
     let rewards_min = market.rewards_min_size.unwrap_or(Decimal::ZERO);
     let mm_min = Decimal::from_f64_retain(config.mm_min_size).unwrap_or(Decimal::ZERO);
     let mut size = market.min_order_size.max(rewards_min).max(mm_min);
@@ -109,66 +140,8 @@ fn generate_token_quotes(
         return None;
     }
 
-    // Enforce rewards max spread constraint
-    if let Some(max_spread) = market.rewards_max_spread {
-        if (ask_price - bid_price) > max_spread {
-            debug!(
-                market = %market.question,
-                spread = %(ask_price - bid_price),
-                max = %max_spread,
-                "rebate-mm: spread exceeds rewards max_spread, tightening"
-            );
-            // Tighten to fit within rewards constraint
-            let tight_half = max_spread / dec!(2);
-            let bid_price = round_to_tick(mid - tight_half + skew, market.min_tick_size);
-            let ask_price = round_to_tick(mid + tight_half + skew, market.min_tick_size);
-            if ask_price <= bid_price {
-                return None;
-            }
-            // Re-create intents with tightened prices
-            let bid_intent = OrderIntent {
-                token_id: token.token_id.clone(),
-                side: Side::Buy,
-                price: bid_price,
-                size,
-                order_type: OrderType::GTC,
-                post_only: true,
-                neg_risk: market.neg_risk,
-                fee_rate_bps: market.maker_fee_bps,
-            };
-            let ask_intent = OrderIntent {
-                token_id: token.token_id.clone(),
-                side: Side::Sell,
-                price: ask_price,
-                size,
-                order_type: OrderType::GTC,
-                post_only: true,
-                neg_risk: market.neg_risk,
-                fee_rate_bps: market.maker_fee_bps,
-            };
-            if let RiskVerdict::Rejected(reason) = risk.check(&market.condition_id, &bid_intent) {
-                debug!(market = %market.question, reason, "rebate-mm: tightened bid rejected");
-                return None;
-            }
-            if let RiskVerdict::Rejected(reason) = risk.check(&market.condition_id, &ask_intent) {
-                debug!(market = %market.question, reason, "rebate-mm: tightened ask rejected");
-                return None;
-            }
-            debug!(
-                market = %market.question,
-                bid = %bid_price,
-                ask = %ask_price,
-                size = %size,
-                skew = %skew,
-                "rebate-mm: quoting (tightened)"
-            );
-            return Some((bid_intent, ask_intent));
-        }
-    }
-
-    // Risk check
     let bid_intent = OrderIntent {
-        token_id: token.token_id.clone(),
+        token_id: t0.token_id.clone(),
         side: Side::Buy,
         price: bid_price,
         size,
@@ -179,9 +152,9 @@ fn generate_token_quotes(
     };
 
     let ask_intent = OrderIntent {
-        token_id: token.token_id.clone(),
-        side: Side::Sell,
-        price: ask_price,
+        token_id: t1.token_id.clone(),
+        side: Side::Buy,
+        price: complement_price,
         size,
         order_type: OrderType::GTC,
         post_only: true,
@@ -189,25 +162,83 @@ fn generate_token_quotes(
         fee_rate_bps: market.maker_fee_bps,
     };
 
-    // Pre-trade risk checks
     if let RiskVerdict::Rejected(reason) = risk.check(&market.condition_id, &bid_intent) {
-        debug!(market = %market.question, reason, "rebate-mm: bid rejected by risk");
+        debug!(market = %market.question, reason, "rebate-mm: bid rejected");
         return None;
     }
     if let RiskVerdict::Rejected(reason) = risk.check(&market.condition_id, &ask_intent) {
-        debug!(market = %market.question, reason, "rebate-mm: ask rejected by risk");
+        debug!(market = %market.question, reason, "rebate-mm: complement rejected");
         return None;
     }
 
     debug!(
         market = %market.question,
         bid = %bid_price,
-        ask = %ask_price,
+        complement = %complement_price,
         size = %size,
-        "rebate-mm: quoting"
+        "rebate-mm: quoting (buy/buy-complement)"
     );
 
     Some((bid_intent, ask_intent))
+}
+
+/// Single token BUY for multi-outcome markets.
+fn generate_single_buy(
+    config: &Config,
+    market: &TradableMarket,
+    token: &crate::market::discovery::TokenInfo,
+    books: &BookStore,
+    risk: &RiskEngine,
+) -> Option<OrderIntent> {
+    let book = books.get(&token.token_id)?;
+    let best_bid = book.bids.best()?.price;
+    let best_ask = book.asks.best()?.price;
+    let mid = (best_bid + best_ask) / Decimal::TWO;
+
+    if best_ask <= best_bid {
+        return None;
+    }
+
+    let tick = market.min_tick_size;
+    let mut bid_price = best_bid;
+
+    if bid_price >= best_ask {
+        bid_price = best_ask - tick;
+    }
+    if bid_price <= Decimal::ZERO {
+        return None;
+    }
+
+    let rewards_min = market.rewards_min_size.unwrap_or(Decimal::ZERO);
+    let mm_min = Decimal::from_f64_retain(config.mm_min_size).unwrap_or(Decimal::ZERO);
+    let mut size = market.min_order_size.max(rewards_min).max(mm_min);
+    let inventory_cap_notional = Decimal::from_f64_retain(
+        config.nav_limit(config.effective_max_one_sided_inventory())
+    ).unwrap_or(Decimal::ZERO);
+    if !mid.is_zero() && inventory_cap_notional > Decimal::ZERO {
+        size = size.min(inventory_cap_notional / mid);
+    }
+    if size < market.min_order_size {
+        return None;
+    }
+
+    let intent = OrderIntent {
+        token_id: token.token_id.clone(),
+        side: Side::Buy,
+        price: bid_price,
+        size,
+        order_type: OrderType::GTC,
+        post_only: true,
+        neg_risk: market.neg_risk,
+        fee_rate_bps: market.maker_fee_bps,
+    };
+
+    if let RiskVerdict::Rejected(reason) = risk.check(&market.condition_id, &intent) {
+        debug!(market = %market.question, reason, "rebate-mm: buy rejected");
+        return None;
+    }
+
+    Some(intent)
 }
 
 /// Round price to the nearest valid tick.
