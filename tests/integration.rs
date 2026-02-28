@@ -260,7 +260,7 @@ async fn expired_fill_generates_unwind() {
                 unwind_attempts: 0,
     });
 
-    let unwinds = tracker.expired_unwinds(&books);
+    let unwinds = tracker.expired_unwinds(&books, 5);
     assert_eq!(unwinds.len(), 1);
     assert!(matches!(unwinds[0].side, Side::Sell), "unwind should sell tokens");
     assert_eq!(unwinds[0].price, dec!(0.48), "should sell at best bid");

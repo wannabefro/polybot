@@ -39,18 +39,25 @@ impl UnhedgedFill {
         self.filled_at.elapsed() > timeout
     }
 
-    /// Build a SELL order to flatten this position (unwind at best bid).
-    pub fn unwind_intent(&self, books: &BookStore) -> Option<OrderIntent> {
-        // We always hold tokens from a BUY fill → SELL at best bid to flatten
+    /// Build a SELL order to flatten this position.
+    /// First attempts use FOK (all-or-nothing). After `fok_threshold` failed
+    /// attempts, switches to GTC (resting limit) to guarantee eventual exit.
+    pub fn unwind_intent(&self, books: &BookStore, fok_threshold: u32) -> Option<OrderIntent> {
         let book = books.get(&self.token_id)?;
         let bid = book.bids.best()?;
+
+        let order_type = if self.unwind_attempts >= fok_threshold {
+            OrderType::GTC // rest on book for guaranteed fill
+        } else {
+            OrderType::FOK
+        };
 
         Some(OrderIntent {
             token_id: self.token_id.clone(),
             side: Side::Sell,
             price: bid.price,
             size: self.size,
-            order_type: OrderType::FOK,
+            order_type,
             post_only: false,
             neg_risk: self.neg_risk,
             fee_rate_bps: self.fee_rate_bps,
@@ -128,6 +135,7 @@ impl HedgeTracker {
 
     /// Remove fills that have exceeded max unwind attempts.
     /// Returns the number of fills force-removed.
+    #[allow(dead_code)]
     pub fn remove_stale_unwinds(&mut self, max_attempts: u32) -> usize {
         let before = self.unhedged.len();
         self.unhedged.retain(|f| f.unwind_attempts < max_attempts);
@@ -136,11 +144,12 @@ impl HedgeTracker {
 
     /// Get fills that have exceeded the hedge window and need unwinding.
     /// Returns SELL intents to flatten the positions.
-    pub fn expired_unwinds(&self, books: &BookStore) -> Vec<OrderIntent> {
+    /// After `fok_threshold` failed FOK attempts, switches to GTC limit sells.
+    pub fn expired_unwinds(&self, books: &BookStore, fok_threshold: u32) -> Vec<OrderIntent> {
         self.unhedged
             .iter()
             .filter(|f| f.hedge_expired(self.hedge_timeout))
-            .filter_map(|f| f.unwind_intent(books))
+            .filter_map(|f| f.unwind_intent(books, fok_threshold))
             .collect()
     }
 
@@ -548,7 +557,7 @@ mod tests {
                 unwind_attempts: 0,
         };
         let books = make_book_store("0.48", "0.52");
-        let intent = fill.unwind_intent(&books).unwrap();
+        let intent = fill.unwind_intent(&books, 5).unwrap();
         assert!(matches!(intent.side, Side::Sell));
         assert_eq!(intent.price, dec!(0.48)); // sell at best bid
         assert_eq!(intent.size, dec!(10));
@@ -569,7 +578,7 @@ mod tests {
                 unwind_attempts: 0,
         };
         let books = make_book_store("0.48", "0.52");
-        let intent = fill.unwind_intent(&books).unwrap();
+        let intent = fill.unwind_intent(&books, 5).unwrap();
         assert!(intent.neg_risk);
         assert_eq!(intent.fee_rate_bps, dec!(20));
     }
@@ -588,7 +597,7 @@ mod tests {
                 unwind_attempts: 0,
         };
         let books = BookStore::new();
-        assert!(fill.unwind_intent(&books).is_none());
+        assert!(fill.unwind_intent(&books, 5).is_none());
     }
 
     // --- HedgeTracker tests ---
@@ -722,7 +731,7 @@ mod tests {
         });
 
         let books = make_book_store("0.48", "0.52");
-        let unwinds = tracker.expired_unwinds(&books);
+        let unwinds = tracker.expired_unwinds(&books, 5);
         assert_eq!(unwinds.len(), 1);
         assert!(matches!(unwinds[0].side, Side::Sell)); // sells to flatten
         assert_eq!(unwinds[0].price, dec!(0.48)); // at best bid

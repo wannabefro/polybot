@@ -369,21 +369,23 @@ async fn main() -> Result<()> {
                 }
 
                 // Unwind expired single-sided fills (complement didn't fill in time)
-                // Force-remove fills that have failed 10+ unwind attempts to unblock quoting
-                let removed = hedge_tracker.remove_stale_unwinds(10);
-                if removed > 0 {
-                    warn!(count = removed, "⚠️ force-removed {removed} fills after 10 failed unwinds");
-                }
-                for unwind in hedge_tracker.expired_unwinds(&books) {
+                // First 5 attempts use FOK; after that switch to GTC limit sell
+                for unwind in hedge_tracker.expired_unwinds(&books, 5) {
+                    let mode = if unwind.order_type == polymarket_client_sdk::clob::types::OrderType::GTC { "GTC" } else { "FOK" };
                     info!(
-                        "⚠️ UNWIND {} {} @ ${} — complement didn't fill",
-                        unwind.token_id, unwind.size, unwind.price,
+                        "⚠️ UNWIND ({}) {} {} @ ${} — complement didn't fill",
+                        mode, unwind.token_id, unwind.size, unwind.price,
                     );
                     match router.place(&unwind, &books).await {
                         Ok(result) => {
                             if result.paper_fill.is_some() || result.live_matched {
                                 hedge_tracker.mark_hedged(&unwind.token_id);
                                 info!("✅ UNWOUND {}", unwind.token_id);
+                            } else if unwind.order_type == polymarket_client_sdk::clob::types::OrderType::GTC {
+                                // GTC sell is now resting on book — mark hedged,
+                                // the exchange will fill it eventually
+                                hedge_tracker.mark_hedged(&unwind.token_id);
+                                info!("📤 SELL resting on book for {}", unwind.token_id);
                             } else {
                                 // FOK didn't fill — record attempt, will retry next tick
                                 let attempts = hedge_tracker.record_unwind_attempt(&unwind.token_id);
