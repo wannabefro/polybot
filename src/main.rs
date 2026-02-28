@@ -200,6 +200,7 @@ async fn main() -> Result<()> {
     let mut max_markets = cfg.max_active_markets();
     let mut live_nav = cfg.nav_usdc;
     let mut live_nav_initialized = false;
+    let mut ws_first_quotable_logged = false;
 
     info!(
         paper_mode = cfg.paper_mode,
@@ -270,7 +271,18 @@ async fn main() -> Result<()> {
             Some(event) = feed_rx.recv() => {
                 match event {
                     FeedEvent::BookSnapshot { asset_id, update } => {
+                        let has_bids = !update.bids.is_empty();
+                        let has_asks = !update.asks.is_empty();
                         books.apply(&asset_id, &update);
+                        if has_bids && has_asks && !ws_first_quotable_logged {
+                            info!(
+                                asset_id = %asset_id,
+                                bids = update.bids.len(),
+                                asks = update.asks.len(),
+                                "ws: first quotable book received"
+                            );
+                            ws_first_quotable_logged = true;
+                        }
                         // After first successful update post-reconnect, resume quoting
                         if books.is_paused() {
                             books.resume();
