@@ -25,10 +25,13 @@ pub struct RiskEngine {
     limit_gross: Decimal,
     limit_daily_loss: Decimal,
     limit_inventory: Decimal,
-    /// Per-market notional exposure (condition_id → USDC notional).
+    /// Per-market net notional exposure (condition_id → signed USDC notional).
+    /// Positive = net long, negative = net short.
     market_exposure: RwLock<HashMap<String, Decimal>>,
     /// Per-token directional exposure (token_id → signed size: +buy, -sell).
     token_inventory: RwLock<HashMap<String, Decimal>>,
+    /// Per-token cumulative cashflow (sell proceeds - buy spend).
+    token_cashflow: RwLock<HashMap<String, Decimal>>,
     /// Daily realized P&L tracker.
     daily_pnl: RwLock<Decimal>,
     /// Emergency halt flag.
@@ -62,6 +65,7 @@ impl RiskEngine {
             limit_inventory,
             market_exposure: RwLock::new(HashMap::new()),
             token_inventory: RwLock::new(HashMap::new()),
+            token_cashflow: RwLock::new(HashMap::new()),
             daily_pnl: RwLock::new(Decimal::ZERO),
             halted: AtomicBool::new(false),
             cancel_failures: AtomicU32::new(0),
@@ -75,25 +79,37 @@ impl RiskEngine {
         }
 
         let notional = intent.price * intent.size;
+        let delta_notional = match intent.side {
+            Side::Buy => notional,
+            Side::Sell => -notional,
+            _ => Decimal::ZERO,
+        };
 
-        // 1. Per-market notional cap (2% NAV default)
+        // 1. Per-market net notional cap (2% NAV default)
         let current = self
             .market_exposure
             .read()
             .get(condition_id)
             .copied()
             .unwrap_or(Decimal::ZERO);
-        if current + notional > self.limit_per_market {
+        let projected = current + delta_notional;
+        if projected.abs() > self.limit_per_market {
             return RiskVerdict::Rejected(format!(
-                "per-market limit: {current} + {notional} > {}", self.limit_per_market
+                "per-market limit: |{projected}| > {}", self.limit_per_market
             ));
         }
 
         // 2. Gross exposure cap (25% NAV default)
-        let gross: Decimal = self.market_exposure.read().values().sum();
-        if gross + notional > self.limit_gross {
+        let gross: Decimal = self
+            .market_exposure
+            .read()
+            .values()
+            .map(|v| v.abs())
+            .sum();
+        let gross_projected = gross - current.abs() + projected.abs();
+        if gross_projected > self.limit_gross {
             return RiskVerdict::Rejected(format!(
-                "gross exposure limit: {gross} + {notional} > {}", self.limit_gross
+                "gross exposure limit: {gross_projected} > {}", self.limit_gross
             ));
         }
 
@@ -137,10 +153,15 @@ impl RiskEngine {
         size: Decimal,
         notional: Decimal,
     ) {
+        let signed_notional = match side {
+            Side::Buy => notional,
+            Side::Sell => -notional,
+            _ => Decimal::ZERO,
+        };
         {
             let mut map = self.market_exposure.write();
             let entry = map.entry(condition_id.to_string()).or_insert(Decimal::ZERO);
-            *entry += notional;
+            *entry += signed_notional;
         }
         {
             let mut inv = self.token_inventory.write();
@@ -151,12 +172,42 @@ impl RiskEngine {
                 _ => {}
             }
         }
+        {
+            let mut cf = self.token_cashflow.write();
+            let entry = cf.entry(token_id.to_string()).or_insert(Decimal::ZERO);
+            match side {
+                Side::Buy => *entry -= notional,
+                Side::Sell => *entry += notional,
+                _ => {}
+            }
+        }
     }
 
     /// Record realized P&L.
     #[allow(dead_code)]
     pub fn record_pnl(&self, amount: Decimal) {
         *self.daily_pnl.write() += amount;
+    }
+
+    /// Set current daily P&L directly (e.g., mark-to-market snapshot).
+    #[allow(dead_code)]
+    pub fn set_daily_pnl(&self, amount: Decimal) {
+        *self.daily_pnl.write() = amount;
+    }
+
+    /// Compute mark-to-market P&L from inventory/cashflow and latest mid prices.
+    #[allow(dead_code)]
+    pub fn mark_to_market_pnl(&self, mids: &HashMap<String, Decimal>) -> Decimal {
+        let inv = self.token_inventory.read();
+        let cf = self.token_cashflow.read();
+
+        let mut pnl = Decimal::ZERO;
+        for (token_id, qty) in inv.iter() {
+            let mid = mids.get(token_id).copied().unwrap_or(Decimal::ZERO);
+            let cashflow = cf.get(token_id).copied().unwrap_or(Decimal::ZERO);
+            pnl += cashflow + (*qty * mid);
+        }
+        pnl
     }
 
     /// Trigger emergency halt.
@@ -391,6 +442,55 @@ mod tests {
         assert!(matches!(verdict, RiskVerdict::Rejected(_)));
     }
 
+    #[test]
+    fn per_market_derisking_sell_is_allowed() {
+        let engine = RiskEngine::new(test_config());
+        // Build long exposure near the per-market cap (2% of 10_000 = 200).
+        engine.record_fill("cond1", "token1", Side::Buy, Decimal::from(190), Decimal::from(190));
+
+        // This sell reduces net market exposure from +190 to +90.
+        let intent = sell_intent("token1", 1.0, 100.0);
+        let verdict = engine.check("cond1", &intent);
+        assert!(
+            matches!(verdict, RiskVerdict::Approved),
+            "de-risking order should be approved"
+        );
+    }
+
+    #[test]
+    fn gross_derisking_order_is_allowed_near_limit() {
+        let engine = RiskEngine::new(test_config());
+
+        // Gross exposure at 2450 (limit is 2500): twelve markets at +200 and one at +50.
+        for i in 0..12 {
+            engine.record_fill(
+                &format!("cond{i}"),
+                &format!("token{i}"),
+                Side::Buy,
+                Decimal::from(200),
+                Decimal::from(200),
+            );
+        }
+        engine.record_fill("cond_x", "token_x", Side::Buy, Decimal::from(50), Decimal::from(50));
+
+        // Sell 80 on cond_x reduces net cond_x from +50 to -30 and gross from 2450 to 2430.
+        let intent = OrderIntent {
+            token_id: "token_x".into(),
+            side: Side::Sell,
+            price: Decimal::ONE,
+            size: Decimal::from(80),
+            order_type: OrderType::GTC,
+            post_only: true,
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+        };
+        let verdict = engine.check("cond_x", &intent);
+        assert!(
+            matches!(verdict, RiskVerdict::Approved),
+            "gross de-risking order should be approved"
+        );
+    }
+
     // ── New: cancel failure halt tests ──
 
     #[test]
@@ -491,5 +591,26 @@ mod tests {
         assert_eq!(engine.limit_gross, safe_nav_decimal(config.nav_usdc, config.max_gross_exposure, "ge"));
         assert_eq!(engine.limit_daily_loss, safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "dl"));
         assert_eq!(engine.limit_inventory, safe_nav_decimal(config.nav_usdc, config.max_one_sided_inventory, "inv"));
+    }
+
+    #[test]
+    fn mark_to_market_pnl_tracks_inventory_and_cashflow() {
+        let engine = RiskEngine::new(test_config());
+        // Buy 100 @ 0.50 => cashflow -50, inventory +100
+        engine.record_fill("cond1", "token1", Side::Buy, Decimal::from(100), Decimal::from(50));
+
+        let mut mids = HashMap::new();
+        mids.insert("token1".into(), "0.60".parse::<Decimal>().unwrap());
+
+        // PnL = -50 + (100 * 0.60) = +10
+        assert_eq!(engine.mark_to_market_pnl(&mids), Decimal::from(10));
+    }
+
+    #[test]
+    fn set_daily_pnl_enforces_loss_stop() {
+        let engine = RiskEngine::new(test_config());
+        engine.set_daily_pnl(Decimal::from(-500)); // below 3% stop on 10k NAV
+        let verdict = engine.check("cond1", &test_intent(0.50, 1.0));
+        assert!(matches!(verdict, RiskVerdict::Rejected(_)));
     }
 }

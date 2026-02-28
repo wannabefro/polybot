@@ -79,11 +79,14 @@ impl PriceTracker {
 /// An open mean-reversion position to track for stop conditions.
 #[derive(Debug, Clone)]
 pub struct MeanRevertPosition {
+    pub condition_id: String,
     pub token_id: String,
     pub side: Side,
     pub entry_price: Decimal,
     pub size: Decimal,
     pub opened_at: Instant,
+    pub neg_risk: bool,
+    pub fee_rate_bps: Decimal,
 }
 
 impl MeanRevertPosition {
@@ -158,15 +161,26 @@ impl MeanRevertState {
                     Side::Sell => Side::Buy,
                     _ => continue,
                 };
+                let Some(book) = books.get(&pos.token_id) else {
+                    continue;
+                };
+                let exit_price = match exit_side {
+                    Side::Sell => book.bids.best().map(|l| l.price),
+                    Side::Buy => book.asks.best().map(|l| l.price),
+                    _ => None,
+                };
+                let Some(price) = exit_price else {
+                    continue;
+                };
                 exits.push(OrderIntent {
                     token_id: pos.token_id.clone(),
                     side: exit_side,
-                    price: Decimal::ZERO, // will be market order (FAK)
+                    price,
                     size: pos.size,
                     order_type: OrderType::FOK,
                     post_only: false,
-                    neg_risk: false,
-                    fee_rate_bps: Decimal::ZERO,
+                    neg_risk: pos.neg_risk,
+                    fee_rate_bps: pos.fee_rate_bps,
                 });
             }
         }
@@ -404,11 +418,14 @@ mod tests {
     #[test]
     fn position_time_stop() {
         let pos = MeanRevertPosition {
+            condition_id: "cond1".into(),
             token_id: "t1".into(),
             side: Side::Buy,
             entry_price: dec!(0.50),
             size: dec!(10),
             opened_at: Instant::now() - Duration::from_secs(TIME_STOP_HOURS * 3600 + 1),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         };
         assert!(pos.time_stopped(TIME_STOP_HOURS));
 
@@ -422,11 +439,14 @@ mod tests {
     #[test]
     fn position_price_stop_buy() {
         let pos = MeanRevertPosition {
+            condition_id: "cond1".into(),
             token_id: "t1".into(),
             side: Side::Buy,
             entry_price: dec!(1.00),
             size: dec!(10),
             opened_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         };
         // 4% loss → should trigger at 3% threshold
         assert!(pos.price_stopped(dec!(0.96), dec!(0.03)));
@@ -439,13 +459,15 @@ mod tests {
     #[test]
     fn position_price_stop_sell() {
         let pos = MeanRevertPosition {
+            condition_id: "cond1".into(),
             token_id: "t1".into(),
             side: Side::Sell,
             entry_price: dec!(1.00),
             size: dec!(10),
             opened_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         };
-        // Price went up 4% → loss for short
         assert!(pos.price_stopped(dec!(1.04), dec!(0.03)));
         // Price went down → profit for short
         assert!(!pos.price_stopped(dec!(0.95), dec!(0.03)));
@@ -456,11 +478,14 @@ mod tests {
         let mut state = MeanRevertState::new();
         let books = make_book_store("0.48", "0.52");
         state.open_position(MeanRevertPosition {
+            condition_id: "cond1".into(),
             token_id: "token1".into(),
             side: Side::Buy,
             entry_price: dec!(0.50),
             size: dec!(10),
             opened_at: Instant::now() - Duration::from_secs(TIME_STOP_HOURS * 3600 + 1),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         });
 
         let exits = state.positions_to_close(&books);
@@ -473,11 +498,14 @@ mod tests {
         let mut state = MeanRevertState::new();
         let books = make_book_store("0.48", "0.52");
         state.open_position(MeanRevertPosition {
+            condition_id: "cond1".into(),
             token_id: "token1".into(),
             side: Side::Buy,
             entry_price: dec!(0.50),
             size: dec!(10),
             opened_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         });
 
         let exits = state.positions_to_close(&books);
@@ -488,11 +516,14 @@ mod tests {
     fn remove_position() {
         let mut state = MeanRevertState::new();
         state.open_position(MeanRevertPosition {
+            condition_id: "cond1".into(),
             token_id: "t1".into(),
             side: Side::Buy,
             entry_price: dec!(0.50),
             size: dec!(10),
             opened_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         });
         assert_eq!(state.open_positions().len(), 1);
         state.remove_position("t1");

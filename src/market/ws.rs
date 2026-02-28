@@ -28,6 +28,7 @@ pub fn spawn(
     universe_rx: watch::Receiver<Arc<Vec<TradableMarket>>>,
 ) -> (tokio::task::JoinHandle<()>, mpsc::UnboundedReceiver<FeedEvent>) {
     let _stale_threshold = config.stale_feed_threshold;
+    let max_ws_tokens = config.max_ws_tokens;
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
     let handle = tokio::spawn(async move {
@@ -37,11 +38,13 @@ pub fn spawn(
         // Watch for universe changes and re-subscribe
         let mut uni_rx = universe_rx;
         loop {
-            // Collect all token IDs from the current universe
+            // Collect all token IDs from the current universe.
+            // Cap to max_ws_tokens to avoid overwhelming the WS server.
             let universe = uni_rx.borrow_and_update().clone();
             let new_ids: Vec<String> = universe
                 .iter()
                 .flat_map(|m| m.tokens.iter().map(|t| t.token_id.clone()))
+                .take(max_ws_tokens)
                 .collect();
 
             if new_ids != current_ids && !new_ids.is_empty() {

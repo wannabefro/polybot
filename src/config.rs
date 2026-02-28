@@ -44,6 +44,9 @@ pub struct Config {
     pub mm_min_size: f64,
     pub neg_risk_stale_secs: u64,
     pub quote_tick_secs: u64,
+    #[allow(dead_code)]
+    pub quote_max_age: Duration,
+    pub max_ws_tokens: usize,
 }
 
 impl Config {
@@ -90,6 +93,10 @@ impl Config {
             mm_min_size: env_or("POLYBOT_MM_MIN_SIZE", "5.0").parse()?,
             neg_risk_stale_secs: env_or("POLYBOT_NR_STALE_SECS", "10").parse()?,
             quote_tick_secs: env_or("POLYBOT_QUOTE_TICK_SECS", "5").parse()?,
+            quote_max_age: Duration::from_secs(
+                env_or("POLYBOT_QUOTE_MAX_AGE_SECS", "20").parse()?,
+            ),
+            max_ws_tokens: env_or("POLYBOT_MAX_WS_TOKENS", "500").parse()?,
         })
     }
 
@@ -133,6 +140,8 @@ pub fn test_config() -> Config {
         mm_min_size: 5.0,
         neg_risk_stale_secs: 10,
         quote_tick_secs: 5,
+        quote_max_age: Duration::from_secs(20),
+        max_ws_tokens: 500,
     }
 }
 

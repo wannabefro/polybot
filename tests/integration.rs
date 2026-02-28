@@ -284,11 +284,14 @@ async fn mean_revert_full_cycle() {
 
     // Track position
     state.open_position(strategy::mean_revert::MeanRevertPosition {
+        condition_id: market.condition_id.clone(),
         token_id: intent.token_id.clone(),
         side: intent.side,
         entry_price: intent.price,
         size: intent.size,
         opened_at: Instant::now(),
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
     });
 
     assert_eq!(state.open_positions().len(), 1);

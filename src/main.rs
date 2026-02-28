@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use polymarket_client_sdk::clob::types::Side;
+use rust_decimal::Decimal;
 use tokio::time;
 use tracing::{error, info, warn};
 
@@ -24,6 +25,32 @@ use crate::order::router::OrderRouter;
 use crate::risk::guardrails::RiskEngine;
 use crate::strategy::mean_revert::MeanRevertState;
 use crate::strategy::reward::{HedgeTracker, UnhedgedFill};
+
+#[derive(Debug, Clone)]
+struct ActiveQuote {
+    order_id: String,
+    placed_at: std::time::Instant,
+}
+
+fn quote_key(intent: &crate::order::pipeline::OrderIntent) -> String {
+    format!("{}:{:?}", intent.token_id, intent.side)
+}
+
+fn scale_intent_size(
+    intent: &mut crate::order::pipeline::OrderIntent,
+    risk_multiplier: f64,
+    min_size: Decimal,
+) -> bool {
+    let Some(mult) = Decimal::from_f64_retain(risk_multiplier) else {
+        return false;
+    };
+    let size = intent.size * mult;
+    if size < min_size || size <= Decimal::ZERO {
+        return false;
+    }
+    intent.size = size;
+    true
+}
 
 /// Helper: process a PlaceResult, recording fills in risk engine and hedge tracker.
 /// Works for both paper mode (paper_fill) and live mode (live_matched).
@@ -144,6 +171,7 @@ async fn main() -> Result<()> {
     // Strategy state
     let mut mean_revert = MeanRevertState::new();
     let mut hedge_tracker = HedgeTracker::new(cfg.hedge_timeout);
+    let mut active_quotes: HashMap<String, ActiveQuote> = HashMap::new();
 
     info!(
         paper_mode = cfg.paper_mode,
@@ -160,14 +188,18 @@ async fn main() -> Result<()> {
             // ── Ctrl-C ──
             _ = tokio::signal::ctrl_c() => {
                 info!("ctrl-c — shutting down");
-                let _ = router.cancel_all().await;
+                if router.cancel_all().await.is_ok() {
+                    active_quotes.clear();
+                }
                 break;
             }
 
             // ── Geoblock trip ──
             _ = geo_rx.changed() => {
                 warn!("geoblock triggered — emergency cancel-all + shutdown");
-                let _ = router.cancel_all().await;
+                if router.cancel_all().await.is_ok() {
+                    active_quotes.clear();
+                }
                 break;
             }
 
@@ -187,6 +219,11 @@ async fn main() -> Result<()> {
 
             // ── Quoting tick ──
             _ = quote_tick.tick() => {
+                let mids = books.all_mids();
+                let mtm_pnl = risk_engine.mark_to_market_pnl(&mids);
+                risk_engine.set_daily_pnl(mtm_pnl);
+                metrics.update_pnl(mtm_pnl);
+
                 if risk_engine.is_halted() {
                     continue;
                 }
@@ -201,9 +238,12 @@ async fn main() -> Result<()> {
                 let sig = signal::read(&signal_rx);
                 if sig.pull {
                     warn!(reason = %sig.reason_code, "signal: pull — cancelling all");
-                    let _ = router.cancel_all().await;
+                    if router.cancel_all().await.is_ok() {
+                        active_quotes.clear();
+                    }
                     continue;
                 }
+                let risk_multiplier = sig.effective_multiplier();
 
                 // Check heartbeat health — Gap #4: cancel-all + halt on stale
                 if heartbeat.is_stale() {
@@ -211,6 +251,8 @@ async fn main() -> Result<()> {
                     if let Err(e) = router.cancel_all().await {
                         error!(err = %e, "heartbeat cancel-all failed");
                         risk_engine.record_cancel_failure();
+                    } else {
+                        active_quotes.clear();
                     }
                     risk_engine.halt("stale heartbeat");
                     continue;
@@ -222,6 +264,8 @@ async fn main() -> Result<()> {
                     if let Err(e) = router.cancel_all().await {
                         error!(err = %e, "hedge emergency cancel-all failed");
                         risk_engine.record_cancel_failure();
+                    } else {
+                        active_quotes.clear();
                     }
                     risk_engine.halt("hedge SLA breach");
                     hedge_tracker.clear();
@@ -239,6 +283,26 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => {
                             error!(err = %e, "hedge order failed");
+                        }
+                    }
+                }
+
+                // Cancel stale maker quotes before refreshing.
+                let stale_quotes: Vec<(String, String)> = active_quotes
+                    .iter()
+                    .filter(|(_, q)| q.placed_at.elapsed() >= cfg.quote_max_age)
+                    .map(|(k, q)| (k.clone(), q.order_id.clone()))
+                    .collect();
+                for (key, order_id) in stale_quotes {
+                    match router.cancel(&order_id).await {
+                        Ok(()) => {
+                            active_quotes.remove(&key);
+                            metrics.inc_quotes_cancelled();
+                            risk_engine.reset_cancel_failures();
+                        }
+                        Err(e) => {
+                            error!(err = %e, order_id = %order_id, "quote lifecycle cancel failed");
+                            risk_engine.record_cancel_failure();
                         }
                     }
                 }
@@ -278,7 +342,7 @@ async fn main() -> Result<()> {
 
                 // ── Rebate MM quoting (concurrent dispatch) ──
                 {
-                    let mut rebate_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool)> = Vec::new();
+                    let mut rebate_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool, String)> = Vec::new();
                     for market in universe.iter() {
                         // Skip rewards-active markets — reward capture handles them
                         if market.rewards_active {
@@ -290,23 +354,43 @@ async fn main() -> Result<()> {
                         let quotes = strategy::rebate_mm::generate_quotes(
                             &cfg, market, &books, &risk_engine,
                         );
-                        for (bid, ask) in quotes {
+                        for (mut bid, mut ask) in quotes {
+                            if !scale_intent_size(&mut bid, risk_multiplier, market.min_order_size) {
+                                continue;
+                            }
+                            if !scale_intent_size(&mut ask, risk_multiplier, market.min_order_size) {
+                                continue;
+                            }
+                            let bid_key = quote_key(&bid);
+                            let ask_key = quote_key(&ask);
+                            if active_quotes.contains_key(&bid_key) || active_quotes.contains_key(&ask_key) {
+                                continue;
+                            }
                             // Rate-limit per order pair, not per market
                             if rate_limiter.try_acquire().is_err() {
                                 break;
                             }
-                            rebate_intents.push((bid, market.condition_id.clone(), false));
-                            rebate_intents.push((ask, market.condition_id.clone(), false));
+                            rebate_intents.push((bid, market.condition_id.clone(), false, bid_key));
+                            rebate_intents.push((ask, market.condition_id.clone(), false, ask_key));
                         }
                     }
                     let results: Vec<_> = futures::future::join_all(
-                        rebate_intents.iter().map(|(intent, _, _)| router.place(intent, &books))
+                        rebate_intents.iter().map(|(intent, _, _, _)| router.place(intent, &books))
                     ).await;
-                    for (res, (intent, cond_id, needs_hedge)) in results.into_iter().zip(rebate_intents.iter()) {
+                    for (res, (intent, cond_id, needs_hedge, key)) in results.into_iter().zip(rebate_intents.iter()) {
                         match res {
                             Ok(result) => {
                                 metrics.inc_quotes_sent();
                                 process_fill(&result, intent, cond_id, &risk_engine, &mut hedge_tracker, &metrics, *needs_hedge);
+                                if intent.post_only && result.paper_fill.is_none() && !result.live_matched {
+                                    active_quotes.insert(
+                                        key.clone(),
+                                        ActiveQuote {
+                                            order_id: result.order_id,
+                                            placed_at: std::time::Instant::now(),
+                                        },
+                                    );
+                                }
                                 risk_engine.reset_cancel_failures();
                             }
                             Err(e) => error!(err = %e, "rebate-mm place failed"),
@@ -316,7 +400,7 @@ async fn main() -> Result<()> {
 
                 // ── Reward capture quoting (concurrent dispatch) ──
                 {
-                    let mut reward_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool)> = Vec::new();
+                    let mut reward_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool, String)> = Vec::new();
                     for market in universe.iter().filter(|m| m.rewards_active) {
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;
@@ -324,23 +408,43 @@ async fn main() -> Result<()> {
                         let quotes = strategy::reward::evaluate_reward_quote(
                             &cfg, market, &books, &risk_engine,
                         );
-                        for (bid, ask) in quotes {
+                        for (mut bid, mut ask) in quotes {
+                            if !scale_intent_size(&mut bid, risk_multiplier, market.min_order_size) {
+                                continue;
+                            }
+                            if !scale_intent_size(&mut ask, risk_multiplier, market.min_order_size) {
+                                continue;
+                            }
+                            let bid_key = quote_key(&bid);
+                            let ask_key = quote_key(&ask);
+                            if active_quotes.contains_key(&bid_key) || active_quotes.contains_key(&ask_key) {
+                                continue;
+                            }
                             // Rate-limit per order pair, not per market
                             if rate_limiter.try_acquire().is_err() {
                                 break;
                             }
-                            reward_intents.push((bid, market.condition_id.clone(), true));
-                            reward_intents.push((ask, market.condition_id.clone(), true));
+                            reward_intents.push((bid, market.condition_id.clone(), true, bid_key));
+                            reward_intents.push((ask, market.condition_id.clone(), true, ask_key));
                         }
                     }
                     let results: Vec<_> = futures::future::join_all(
-                        reward_intents.iter().map(|(intent, _, _)| router.place(intent, &books))
+                        reward_intents.iter().map(|(intent, _, _, _)| router.place(intent, &books))
                     ).await;
-                    for (res, (intent, cond_id, needs_hedge)) in results.into_iter().zip(reward_intents.iter()) {
+                    for (res, (intent, cond_id, needs_hedge, key)) in results.into_iter().zip(reward_intents.iter()) {
                         match res {
                             Ok(result) => {
                                 metrics.inc_quotes_sent();
                                 process_fill(&result, intent, cond_id, &risk_engine, &mut hedge_tracker, &metrics, *needs_hedge);
+                                if intent.post_only && result.paper_fill.is_none() && !result.live_matched {
+                                    active_quotes.insert(
+                                        key.clone(),
+                                        ActiveQuote {
+                                            order_id: result.order_id,
+                                            placed_at: std::time::Instant::now(),
+                                        },
+                                    );
+                                }
                                 risk_engine.reset_cancel_failures();
                             }
                             Err(e) => error!(err = %e, "reward place failed"),
@@ -363,10 +467,37 @@ async fn main() -> Result<()> {
                 // Check stop exits
                 for exit in mean_revert.positions_to_close(&books) {
                     info!(token = %exit.token_id, "mean-revert: stop triggered");
-                    if let Err(e) = router.place(&exit, &books).await {
-                        error!(err = %e, "mean-revert exit failed");
+                    let Some(condition_id) = mean_revert
+                        .open_positions()
+                        .iter()
+                        .find(|p| p.token_id == exit.token_id)
+                        .map(|p| p.condition_id.clone())
+                    else {
+                        warn!(token = %exit.token_id, "mean-revert: missing condition id for exit");
+                        continue;
+                    };
+
+                    match router.place(&exit, &books).await {
+                        Ok(result) => {
+                            process_fill(
+                                &result,
+                                &exit,
+                                &condition_id,
+                                &risk_engine,
+                                &mut hedge_tracker,
+                                &metrics,
+                                false,
+                            );
+                            if result.paper_fill.is_some() || result.live_matched {
+                                mean_revert.remove_position(&exit.token_id);
+                            } else {
+                                warn!(token = %exit.token_id, "mean-revert: exit not filled; position retained");
+                            }
+                        }
+                        Err(e) => {
+                            error!(err = %e, "mean-revert exit failed");
+                        }
                     }
-                    mean_revert.remove_position(&exit.token_id);
                 }
 
                 // New entries
@@ -374,29 +505,50 @@ async fn main() -> Result<()> {
                     if rate_limiter.try_acquire().is_err() {
                         break;
                     }
-                    if let Some(intent) = strategy::mean_revert::evaluate_entry(
+                    if let Some(mut intent) = strategy::mean_revert::evaluate_entry(
                         &cfg, market, &books, &risk_engine, &mean_revert,
                     ) {
+                        if !scale_intent_size(&mut intent, risk_multiplier, market.min_order_size) {
+                            continue;
+                        }
                         match router.place(&intent, &books).await {
                             Ok(result) => {
+                                process_fill(
+                                    &result,
+                                    &intent,
+                                    &market.condition_id,
+                                    &risk_engine,
+                                    &mut hedge_tracker,
+                                    &metrics,
+                                    false,
+                                );
                                 // Only track position on confirmed fill, not just submission
                                 if result.paper_fill.is_some() || result.live_matched {
                                     mean_revert.open_position(
                                         strategy::mean_revert::MeanRevertPosition {
+                                            condition_id: market.condition_id.clone(),
                                             token_id: intent.token_id.clone(),
                                             side: intent.side,
                                             entry_price: intent.price,
                                             size: intent.size,
                                             opened_at: std::time::Instant::now(),
+                                            neg_risk: intent.neg_risk,
+                                            fee_rate_bps: intent.fee_rate_bps,
                                         },
                                     );
-                                    metrics.inc_fills();
                                 }
                             }
                             Err(e) => error!(err = %e, "mean-revert entry failed"),
                         }
                     }
                 }
+
+                let quote_age_ms = active_quotes
+                    .values()
+                    .map(|q| q.placed_at.elapsed().as_millis() as u64)
+                    .max()
+                    .unwrap_or(0);
+                metrics.update_quote_age_ms(quote_age_ms);
 
                 // Record heartbeat on successful tick
                 heartbeat.record_success();
