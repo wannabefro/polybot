@@ -21,6 +21,7 @@ use crate::intelligence::signal;
 use crate::market::book::BookStore;
 use crate::market::ws::FeedEvent;
 use crate::ops::metrics::Metrics;
+use crate::ops::rewards::RewardTracker;
 use crate::order::router::OrderRouter;
 use crate::risk::guardrails::RiskEngine;
 use crate::strategy::mean_revert::MeanRevertState;
@@ -193,6 +194,7 @@ async fn main() -> Result<()> {
     // ── Phase 5: Order routing + metrics ───────────────────────
     let router = OrderRouter::new(&cfg, auth_ctx.clone());
     let metrics = Metrics::new();
+    let reward_tracker = RewardTracker::new();
 
     // ── Startup reconciliation: cancel stale orders from prior run ──
     match router.cancel_all().await {
@@ -246,6 +248,7 @@ async fn main() -> Result<()> {
     let mut quote_tick = time::interval(Duration::from_secs(cfg.quote_tick_secs));
     let mut daily_reset = time::interval(Duration::from_secs(86400));
     let mut status_tick = time::interval(cfg.metrics_interval);
+    let mut rewards_tick = time::interval(Duration::from_secs(300)); // poll earnings every 5 min
 
     loop {
         tokio::select! {
@@ -406,15 +409,22 @@ async fn main() -> Result<()> {
                     })
                     .map(|(k, q)| (k.clone(), q.order_id.clone()))
                     .collect();
-                for (key, order_id) in stale_quotes {
-                    match router.cancel(&order_id).await {
-                        Ok(()) => {
-                            active_quotes.remove(&key);
-                            metrics.inc_quotes_cancelled();
+                // Batch cancel stale quotes (single API call).
+                let stale_keys: Vec<String> = stale_quotes.iter().map(|(k, _)| k.clone()).collect();
+                let stale_ids: Vec<String> = stale_quotes.iter().map(|(_, id)| id.clone()).collect();
+                if !stale_ids.is_empty() {
+                    match router.cancel_batch(&stale_ids).await {
+                        Ok(n) => {
+                            for key in &stale_keys {
+                                active_quotes.remove(key);
+                            }
+                            for _ in 0..n {
+                                metrics.inc_quotes_cancelled();
+                            }
                             risk_engine.reset_cancel_failures();
                         }
                         Err(e) => {
-                            error!(err = %e, order_id = %order_id, "quote lifecycle cancel failed");
+                            error!(err = %e, count = stale_ids.len(), "batch cancel failed");
                             risk_engine.record_cancel_failure();
                         }
                     }
@@ -776,20 +786,29 @@ async fn main() -> Result<()> {
                 risk_engine.reset_daily();
             }
 
+            // ── Reward earnings poll ──
+            _ = rewards_tick.tick() => {
+                if !cfg.paper_mode {
+                    ops::rewards::refresh_earnings(&auth_ctx.client, &reward_tracker).await;
+                }
+            }
+
             // ── Status dashboard ──
             _ = status_tick.tick() => {
                 let universe = universe_rx.borrow().clone();
                 let s = metrics.snapshot();
                 let books_quotable = books.count_quotable();
                 let halted = risk_engine.is_halted();
+                let rewards = reward_tracker.total();
 
                 info!(
-                    "📊 NAV ${:.2} | quotes {}/{} | fills {} | pnl {} | markets {} | books {} | {}",
+                    "📊 NAV ${:.2} | quotes {}/{} | fills {} | pnl {} | rewards ${:.2} | markets {} | books {} | {}",
                     live_nav,
                     active_quotes.len(),
                     s.quotes_sent,
                     s.fills_count,
                     s.daily_pnl,
+                    rewards,
                     universe.len(),
                     books_quotable,
                     if halted { "⛔ HALTED" } else { "✅ OK" },

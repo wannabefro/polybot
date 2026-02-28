@@ -84,6 +84,113 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
     })
 }
 
+/// Cancel specific orders in a batch. Returns the count cancelled.
+pub async fn cancel_batch(client: &AuthClient, order_ids: &[String]) -> Result<usize> {
+    if order_ids.is_empty() {
+        return Ok(0);
+    }
+    let refs: Vec<&str> = order_ids.iter().map(|s| s.as_str()).collect();
+    client.cancel_orders(&refs).await?;
+    debug!(count = order_ids.len(), "order: batch cancelled");
+    Ok(order_ids.len())
+}
+
+/// Place multiple orders in a single batch API call. Returns results per order.
+#[allow(dead_code)]
+pub async fn place_batch(
+    ctx: &AuthContext,
+    intents: &[OrderIntent],
+) -> Vec<Result<OrderResult>> {
+    if intents.is_empty() {
+        return Vec::new();
+    }
+
+    let client = &*ctx.client;
+
+    // Sign all orders
+    let mut signed_orders = Vec::with_capacity(intents.len());
+    let mut valid_indices = Vec::with_capacity(intents.len());
+    let mut results: Vec<Option<Result<OrderResult>>> = (0..intents.len()).map(|_| None).collect();
+
+    for (i, intent) in intents.iter().enumerate() {
+        let token_id: U256 = match intent.token_id.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                results[i] = Some(Err(anyhow::anyhow!("invalid token_id")));
+                continue;
+            }
+        };
+
+        client.set_neg_risk(token_id, intent.neg_risk);
+        let fee_bps_u32 = u32::try_from(intent.fee_rate_bps.mantissa()).unwrap_or(0);
+        client.set_fee_rate_bps(token_id, fee_bps_u32);
+
+        let signable = match client
+            .limit_order()
+            .token_id(token_id)
+            .side(intent.side)
+            .price(intent.price)
+            .size(intent.size.trunc_with_scale(2))
+            .order_type(intent.order_type.clone())
+            .post_only(intent.post_only)
+            .build()
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                results[i] = Some(Err(e.into()));
+                continue;
+            }
+        };
+
+        match client.sign(&*ctx.signer, signable).await {
+            Ok(signed) => {
+                signed_orders.push(signed);
+                valid_indices.push(i);
+            }
+            Err(e) => {
+                results[i] = Some(Err(e.into()));
+            }
+        }
+    }
+
+    if signed_orders.is_empty() {
+        return results.into_iter().map(|r| r.unwrap()).collect();
+    }
+
+    // Submit batch
+    match client.post_orders(signed_orders).await {
+        Ok(responses) => {
+            for (resp, &idx) in responses.iter().zip(valid_indices.iter()) {
+                let matched = resp.status == polymarket_client_sdk::clob::types::OrderStatusType::Matched;
+                debug!(
+                    order_id = %resp.order_id,
+                    side = ?intents[idx].side,
+                    price = %intents[idx].price,
+                    "order: batch placed"
+                );
+                results[idx] = Some(Ok(OrderResult {
+                    order_id: resp.order_id.clone(),
+                    intent: intents[idx].clone(),
+                    matched,
+                    making_amount: resp.making_amount,
+                    taking_amount: resp.taking_amount,
+                }));
+            }
+        }
+        Err(e) => {
+            // Batch failed — mark all valid orders as failed
+            for &idx in &valid_indices {
+                if results[idx].is_none() {
+                    results[idx] = Some(Err(anyhow::anyhow!("batch post failed: {e}")));
+                }
+            }
+        }
+    }
+
+    results.into_iter().map(|r| r.unwrap_or_else(|| Err(anyhow::anyhow!("unreachable")))).collect()
+}
+
 /// Cancel a specific order.
 #[allow(dead_code)]
 pub async fn cancel(client: &AuthClient, order_id: &str) -> Result<()> {

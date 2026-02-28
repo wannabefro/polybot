@@ -87,6 +87,51 @@ impl OrderRouter {
         }
     }
 
+    /// Cancel multiple orders in a single batch API call.
+    pub async fn cancel_batch(&self, order_ids: &[String]) -> Result<usize> {
+        match self {
+            Self::Paper(engine) => {
+                for id in order_ids {
+                    engine.cancel_order(id);
+                }
+                Ok(order_ids.len())
+            }
+            Self::Live(ctx) => pipeline::cancel_batch(&ctx.client, order_ids).await,
+        }
+    }
+
+    /// Place multiple orders in a single batch API call.
+    #[allow(dead_code)]
+    pub async fn place_batch(&self, intents: &[OrderIntent], books: &BookStore) -> Vec<Result<PlaceResult>> {
+        match self {
+            Self::Paper(engine) => {
+                intents.iter().map(|intent| {
+                    let (id, paper_fill) = engine.place_order(intent, books);
+                    Ok(PlaceResult {
+                        order_id: id,
+                        paper_fill,
+                        live_matched: false,
+                        live_intent: None,
+                        fill_size: Decimal::ZERO,
+                        fill_notional: Decimal::ZERO,
+                    })
+                }).collect()
+            }
+            Self::Live(ctx) => {
+                pipeline::place_batch(ctx, intents).await.into_iter().map(|r| {
+                    r.map(|result| PlaceResult {
+                        order_id: result.order_id,
+                        paper_fill: None,
+                        live_matched: result.matched,
+                        live_intent: Some(result.intent),
+                        fill_size: result.making_amount,
+                        fill_notional: result.taking_amount,
+                    })
+                }).collect()
+            }
+        }
+    }
+
     /// Emergency cancel-all.
     pub async fn cancel_all(&self) -> Result<()> {
         match self {
