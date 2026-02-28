@@ -1,2 +1,123 @@
-// Market discovery engine — filters and ranks the tradable universe.
-// Polls /sampling-markets and /simplified-markets every 60s.
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+use tokio::time;
+use tracing::{error, info, warn};
+
+use crate::auth::AuthClient;
+use crate::config::Config;
+
+/// Compact view of a tradeable market, distilled from the CLOB response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradableMarket {
+    pub condition_id: String,
+    pub question: String,
+    pub tokens: Vec<TokenInfo>,
+    pub neg_risk: bool,
+    pub neg_risk_market_id: Option<String>,
+    pub min_tick_size: Decimal,
+    pub min_order_size: Decimal,
+    pub maker_fee_bps: Decimal,
+    pub rewards_active: bool,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenInfo {
+    pub token_id: String,
+    pub outcome: String,
+    pub price: Decimal,
+}
+
+/// Filters applied during discovery to build the tradable universe.
+fn passes_filter(
+    active: bool,
+    closed: bool,
+    accepting_orders: bool,
+    min_tick: Decimal,
+) -> bool {
+    active && !closed && accepting_orders && min_tick > Decimal::ZERO
+}
+
+/// Fetch all active markets from the CLOB endpoint, paginating through cursors.
+async fn fetch_all_markets(client: &AuthClient) -> Result<Vec<TradableMarket>> {
+    let mut results = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let page = client.markets(cursor).await?;
+
+        for m in &page.data {
+            if !passes_filter(m.active, m.closed, m.accepting_orders, m.minimum_tick_size) {
+                continue;
+            }
+
+            let condition_id = match &m.condition_id {
+                Some(id) => format!("{id:?}"),
+                None => continue,
+            };
+
+            let tokens: Vec<TokenInfo> = m
+                .tokens
+                .iter()
+                .map(|t| TokenInfo {
+                    token_id: t.token_id.to_string(),
+                    outcome: t.outcome.clone(),
+                    price: t.price,
+                })
+                .collect();
+
+            results.push(TradableMarket {
+                condition_id,
+                question: m.question.clone(),
+                tokens,
+                neg_risk: m.neg_risk,
+                neg_risk_market_id: m.neg_risk_market_id.map(|id| format!("{id:?}")),
+                min_tick_size: m.minimum_tick_size,
+                min_order_size: m.minimum_order_size,
+                maker_fee_bps: m.maker_base_fee,
+                rewards_active: m.rewards.rates.iter().any(|r| r.rewards_daily_rate > Decimal::ZERO),
+                tags: m.tags.clone(),
+            });
+        }
+
+        // "DONE" sentinel or empty cursor means no more pages
+        if page.next_cursor == "DONE" || page.next_cursor.is_empty() {
+            break;
+        }
+        cursor = Some(page.next_cursor);
+    }
+
+    Ok(results)
+}
+
+/// Spawn the discovery loop. Returns a watch receiver for the current universe.
+pub fn spawn(
+    config: &Config,
+    client: AuthClient,
+) -> (tokio::task::JoinHandle<()>, watch::Receiver<Arc<Vec<TradableMarket>>>) {
+    let interval = config.discovery_interval;
+    let (tx, rx) = watch::channel(Arc::new(Vec::new()));
+
+    let handle = tokio::spawn(async move {
+        let mut ticker = time::interval(interval);
+        loop {
+            ticker.tick().await;
+            match fetch_all_markets(&client).await {
+                Ok(markets) => {
+                    info!(count = markets.len(), "discovery: refreshed tradable universe");
+                    let _ = tx.send(Arc::new(markets));
+                }
+                Err(e) => {
+                    error!("discovery: fetch failed: {e}");
+                }
+            }
+        }
+    });
+
+    (handle, rx)
+}

@@ -2368,6 +2368,7 @@ dependencies = [
  "once_cell",
  "serdect",
  "sha2",
+ "signature",
 ]
 
 [[package]]
@@ -2825,9 +2826,13 @@ dependencies = [
  "anyhow",
  "chrono",
  "dashmap",
+ "futures",
+ "k256",
+ "parking_lot",
  "polymarket-client-sdk",
  "reqwest 0.12.28",
  "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
