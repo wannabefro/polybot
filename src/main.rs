@@ -131,7 +131,8 @@ async fn main() -> Result<()> {
 
     info!("polybot starting");
 
-    // Load .env / .env.local if present (before config reads env vars)
+    // Load .env.local first (higher priority), then .env as fallback
+    dotenvy::from_filename(".env.local").ok();
     dotenvy::dotenv().ok();
 
     // ── Phase 1: Config + compliance gate ──────────────────────
