@@ -159,6 +159,7 @@ impl Metrics {
     }
 
     /// Log a periodic metrics summary.
+    #[allow(dead_code)]
     pub fn log_summary(&self) {
         let s = self.snapshot();
         info!(
@@ -219,6 +220,7 @@ pub struct MetricsSnapshot {
 }
 
 /// Spawn periodic metrics logging.
+#[allow(dead_code)]
 pub fn spawn_logger(
     metrics: Arc<Metrics>,
     interval: std::time::Duration,

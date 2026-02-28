@@ -2,7 +2,7 @@
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::config::Config;
 use crate::market::book::BookStore;
@@ -132,7 +132,7 @@ fn generate_token_quotes(
                 debug!(market = %market.question, reason, "rebate-mm: tightened ask rejected");
                 return None;
             }
-            info!(
+            debug!(
                 market = %market.question,
                 bid = %bid_price,
                 ask = %ask_price,
@@ -177,7 +177,7 @@ fn generate_token_quotes(
         return None;
     }
 
-    info!(
+    debug!(
         market = %market.question,
         bid = %bid_price,
         ask = %ask_price,

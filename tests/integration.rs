@@ -18,7 +18,6 @@ use polymarket_client_sdk::clob::ws::types::response::{BookUpdate, OrderBookLeve
 use polymarket_client_sdk::types::{B256, U256};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // ─── Helpers ──────────────────────────────────────────────────

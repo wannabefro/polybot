@@ -166,7 +166,6 @@ async fn main() -> Result<()> {
     // ── Phase 5: Order routing + metrics ───────────────────────
     let router = OrderRouter::new(&cfg, auth_ctx);
     let metrics = Metrics::new();
-    let _metrics_handle = ops::metrics::spawn_logger(metrics.clone(), cfg.metrics_interval);
 
     // Strategy state
     let mut mean_revert = MeanRevertState::new();
@@ -182,6 +181,7 @@ async fn main() -> Result<()> {
     // ── Main event loop ────────────────────────────────────────
     let mut quote_tick = time::interval(Duration::from_secs(cfg.quote_tick_secs));
     let mut daily_reset = time::interval(Duration::from_secs(86400));
+    let mut status_tick = time::interval(cfg.metrics_interval);
 
     loop {
         tokio::select! {
@@ -559,6 +559,40 @@ async fn main() -> Result<()> {
                 info!("daily reset: clearing metrics + risk counters");
                 metrics.reset_daily();
                 risk_engine.reset_daily();
+            }
+
+            // ── Status dashboard ──
+            _ = status_tick.tick() => {
+                let universe = universe_rx.borrow().clone();
+                let s = metrics.snapshot();
+                let books_populated = universe.iter()
+                    .flat_map(|m| m.tokens.iter())
+                    .filter(|t| books.get(&t.token_id).is_some())
+                    .count();
+                let books_total = universe.iter()
+                    .map(|m| m.tokens.len())
+                    .sum::<usize>();
+                let mr_positions = mean_revert.open_positions().len();
+                let unhedged = hedge_tracker.unhedged_count();
+                let halted = risk_engine.is_halted();
+
+                info!(
+                    markets = universe.len(),
+                    books = %format!("{}/{}", books_populated, books_total),
+                    active_quotes = active_quotes.len(),
+                    quotes_sent = s.quotes_sent,
+                    fills = s.fills_count,
+                    pnl = %s.daily_pnl,
+                    rebate = %s.rebate_accrual,
+                    mr_positions,
+                    unhedged,
+                    risk_rejections = s.risk_rejections,
+                    cancel_failures = s.cancel_failures,
+                    ws_reconnects = s.ws_reconnects,
+                    throttled = s.throttle_count,
+                    halted,
+                    "📊 status"
+                );
             }
         }
     }

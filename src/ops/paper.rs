@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rust_decimal::Decimal;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::market::book::BookStore;
 use crate::order::pipeline::OrderIntent;
@@ -87,7 +87,7 @@ impl PaperEngine {
             self.fills.write().push(fill.clone());
             (order_id, Some(fill))
         } else {
-            info!(
+            debug!(
                 id = %order_id,
                 side = ?intent.side,
                 price = %intent.price,

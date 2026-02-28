@@ -1,12 +1,14 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use futures::StreamExt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::watch;
 use tokio::time;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::auth::AuthClient;
 use crate::config::Config;
@@ -58,7 +60,7 @@ async fn fetch_all_markets(client: &AuthClient, gamma_host: &str) -> Result<Vec<
         }
 
         let condition_id = match &m.condition_id {
-            Some(id) => format!("{id:?}"),
+            Some(id) => id.to_string(),
             None => continue,
         };
 
@@ -93,7 +95,7 @@ async fn fetch_all_markets(client: &AuthClient, gamma_host: &str) -> Result<Vec<
             question: m.question.clone(),
             tokens,
             neg_risk: m.neg_risk,
-            neg_risk_market_id: m.neg_risk_market_id.map(|id| format!("{id:?}")),
+            neg_risk_market_id: m.neg_risk_market_id.map(|id| id.to_string()),
             min_tick_size: m.minimum_tick_size,
             min_order_size: m.minimum_order_size,
             maker_fee_bps: m.maker_base_fee,
@@ -110,13 +112,112 @@ async fn fetch_all_markets(client: &AuthClient, gamma_host: &str) -> Result<Vec<
 
     Ok(results)
 }
-///
-/// TODO: actual Gamma API call pattern: `GET {gamma_host}/markets?id=<condition_id>`
-/// For now this is a stub that can be wired up once the Gamma client is available.
-pub async fn enrich_volume(_gamma_host: &str, _markets: &mut [TradableMarket]) {
-    // Stubbed — each market's volume_24h stays at its current value.
-    // Future: for each market, call GET /markets?id=<condition_id> and parse
-    // the `volume24hr` field from the Gamma API response.
+
+fn parse_number(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse::<f64>().ok())
+}
+
+fn extract_volume_24h(value: &Value) -> Option<f64> {
+    const VOLUME_KEYS: [&str; 5] = ["volume24hr", "volume24h", "volume24Hr", "volume_24h", "volume"];
+    for key in VOLUME_KEYS {
+        if let Some(v) = value.get(key).and_then(parse_number) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn extract_condition_id(value: &Value) -> Option<&str> {
+    const CONDITION_KEYS: [&str; 3] = ["conditionId", "condition_id", "id"];
+    for key in CONDITION_KEYS {
+        if let Some(v) = value.get(key).and_then(Value::as_str) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn parse_volume_from_gamma_body(body: &Value, condition_id: &str) -> Option<f64> {
+    match body {
+        Value::Array(markets) => markets
+            .iter()
+            .find(|m| extract_condition_id(m) == Some(condition_id))
+            .or_else(|| markets.first())
+            .and_then(extract_volume_24h),
+        Value::Object(_) => {
+            if let Some(markets) = body.get("markets").and_then(Value::as_array) {
+                return markets
+                    .iter()
+                    .find(|m| extract_condition_id(m) == Some(condition_id))
+                    .or_else(|| markets.first())
+                    .and_then(extract_volume_24h);
+            }
+            extract_volume_24h(body)
+        }
+        _ => None,
+    }
+}
+
+pub async fn enrich_volume(gamma_host: &str, markets: &mut [TradableMarket]) {
+    if markets.is_empty() {
+        return;
+    }
+
+    let host = gamma_host.trim_end_matches('/').to_string();
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(err = %e, "discovery: failed to build gamma client");
+            return;
+        }
+    };
+
+    let ids: Vec<String> = markets.iter().map(|m| m.condition_id.clone()).collect();
+    let mut stream = futures::stream::iter(ids.into_iter().enumerate().map(|(idx, condition_id)| {
+        let client = client.clone();
+        let host = host.clone();
+        async move {
+            let url = format!("{host}/markets");
+            let resp = client
+                .get(url)
+                .query(&[("id", condition_id.as_str())])
+                .send()
+                .await;
+            (idx, condition_id, resp)
+        }
+    }))
+    .buffer_unordered(16);
+
+    while let Some((idx, condition_id, resp)) = stream.next().await {
+        let Ok(resp) = resp else {
+            warn!(condition_id = %condition_id, "discovery: gamma volume request failed");
+            continue;
+        };
+        if !resp.status().is_success() {
+            warn!(
+                condition_id = %condition_id,
+                status = %resp.status(),
+                "discovery: gamma volume request non-success"
+            );
+            continue;
+        }
+
+        match resp.json::<Value>().await {
+            Ok(body) => {
+                if let Some(volume) = parse_volume_from_gamma_body(&body, &condition_id) {
+                    markets[idx].volume_24h = volume;
+                }
+            }
+            Err(e) => {
+                warn!(err = %e, condition_id = %condition_id, "discovery: gamma volume parse failed");
+            }
+        }
+    }
 }
 
 /// Spawn the discovery loop. Returns a watch receiver for the current universe.
@@ -156,5 +257,13 @@ mod tests {
         let mut markets: Vec<TradableMarket> = Vec::new();
         enrich_volume("https://gamma-api.polymarket.com", &mut markets).await;
         assert!(markets.is_empty());
+    }
+
+    #[test]
+    fn parse_volume_handles_nested_markets_shape() {
+        let body = serde_json::json!({
+            "markets":[{"condition_id":"cond1","volume24h":42.0}]
+        });
+        assert_eq!(parse_volume_from_gamma_body(&body, "cond1"), Some(42.0));
     }
 }
