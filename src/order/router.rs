@@ -17,6 +17,10 @@ pub struct PlaceResult {
     pub order_id: String,
     /// If the paper engine filled immediately, this is Some.
     pub paper_fill: Option<PaperFill>,
+    /// In live mode, if the CLOB matched (e.g. FOK order), this is true.
+    pub live_matched: bool,
+    /// In live mode, the intent that was submitted (for recording fills).
+    pub live_intent: Option<OrderIntent>,
 }
 
 /// Unified order routing — paper or live.
@@ -45,6 +49,8 @@ impl OrderRouter {
                 Ok(PlaceResult {
                     order_id: id,
                     paper_fill,
+                    live_matched: false,
+                    live_intent: None,
                 })
             }
             Self::Live(ctx) => {
@@ -52,6 +58,8 @@ impl OrderRouter {
                 Ok(PlaceResult {
                     order_id: result.order_id,
                     paper_fill: None,
+                    live_matched: result.matched,
+                    live_intent: Some(intent.clone()),
                 })
             }
         }

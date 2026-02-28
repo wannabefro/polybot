@@ -197,8 +197,8 @@ pub fn evaluate_entry(
     risk: &RiskEngine,
     state: &MeanRevertState,
 ) -> Option<OrderIntent> {
-    // Filter: deep markets only
-    if market.volume_24h < config.mean_revert_min_volume_24h {
+    // Filter: deep markets only (skip if volume is unknown/unenriched)
+    if market.volume_24h > 0.0 && market.volume_24h < config.mean_revert_min_volume_24h {
         debug!(
             market = %market.question,
             volume = market.volume_24h,

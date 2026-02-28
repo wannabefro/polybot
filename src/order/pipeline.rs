@@ -28,6 +28,12 @@ pub struct OrderIntent {
 pub struct OrderResult {
     pub order_id: String,
     pub intent: OrderIntent,
+    /// True if the CLOB matched this order (e.g. FOK fills).
+    pub matched: bool,
+    /// Size filled by the CLOB, from making_amount.
+    pub making_amount: Decimal,
+    /// USDC side of the match, from taking_amount.
+    pub taking_amount: Decimal,
 }
 
 /// Place a single maker order (GTC + postOnly).
@@ -69,9 +75,13 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
         "order: placed"
     );
 
+    let matched = resp.status == polymarket_client_sdk::clob::types::OrderStatusType::Matched;
     Ok(OrderResult {
         order_id: resp.order_id,
         intent: intent.clone(),
+        matched,
+        making_amount: resp.making_amount,
+        taking_amount: resp.taking_amount,
     })
 }
 

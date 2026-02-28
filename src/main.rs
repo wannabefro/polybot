@@ -29,6 +29,7 @@ use crate::strategy::mean_revert::MeanRevertState;
 use crate::strategy::reward::{HedgeTracker, UnhedgedFill};
 
 /// Helper: process a PlaceResult, recording fills in risk engine and hedge tracker.
+/// Works for both paper mode (paper_fill) and live mode (live_matched).
 fn process_fill(
     result: &crate::order::router::PlaceResult,
     intent: &crate::order::pipeline::OrderIntent,
@@ -38,6 +39,7 @@ fn process_fill(
     metrics: &Metrics,
     needs_hedge: bool,
 ) {
+    // Paper mode: use PaperFill details
     if let Some(ref fill) = result.paper_fill {
         let side = match fill.side.as_str() {
             "Buy" => Side::Buy,
@@ -52,6 +54,26 @@ fn process_fill(
                 side,
                 price: fill.price,
                 size: fill.size,
+                filled_at: std::time::Instant::now(),
+                neg_risk: intent.neg_risk,
+                fee_rate_bps: intent.fee_rate_bps,
+            });
+        }
+        return;
+    }
+
+    // Live mode: CLOB reported a match (e.g. FOK/IOC filled)
+    if result.live_matched {
+        let notional = intent.price * intent.size;
+        risk_engine.record_fill(condition_id, &intent.token_id, intent.side, intent.size, notional);
+        metrics.inc_fills();
+
+        if needs_hedge {
+            hedge_tracker.record_fill(UnhedgedFill {
+                token_id: intent.token_id.clone(),
+                side: intent.side,
+                price: intent.price,
+                size: intent.size,
                 filled_at: std::time::Instant::now(),
                 neg_risk: intent.neg_risk,
                 fee_rate_bps: intent.fee_rate_bps,
@@ -206,7 +228,7 @@ async fn main() -> Result<()> {
                 for hedge in hedge_tracker.pending_hedges(&books) {
                     match router.place(&hedge, &books).await {
                         Ok(result) => {
-                            if result.paper_fill.is_some() {
+                            if result.paper_fill.is_some() || result.live_matched {
                                 hedge_tracker.mark_hedged(&hedge.token_id);
                             }
                             risk_engine.reset_cancel_failures();
@@ -258,15 +280,17 @@ async fn main() -> Result<()> {
                         if market.rewards_active {
                             continue;
                         }
-                        if rate_limiter.try_acquire().is_err() {
-                            break;
-                        }
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;
                         }
-                        for (bid, ask) in strategy::rebate_mm::generate_quotes(
+                        let quotes = strategy::rebate_mm::generate_quotes(
                             &cfg, market, &books, &risk_engine,
-                        ) {
+                        );
+                        for (bid, ask) in quotes {
+                            // Rate-limit per order pair, not per market
+                            if rate_limiter.try_acquire().is_err() {
+                                break;
+                            }
                             rebate_intents.push((bid, market.condition_id.clone(), false));
                             rebate_intents.push((ask, market.condition_id.clone(), false));
                         }
@@ -290,15 +314,17 @@ async fn main() -> Result<()> {
                 {
                     let mut reward_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool)> = Vec::new();
                     for market in universe.iter().filter(|m| m.rewards_active) {
-                        if rate_limiter.try_acquire().is_err() {
-                            break;
-                        }
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;
                         }
-                        for (bid, ask) in strategy::reward::evaluate_reward_quote(
+                        let quotes = strategy::reward::evaluate_reward_quote(
                             &cfg, market, &books, &risk_engine,
-                        ) {
+                        );
+                        for (bid, ask) in quotes {
+                            // Rate-limit per order pair, not per market
+                            if rate_limiter.try_acquire().is_err() {
+                                break;
+                            }
                             reward_intents.push((bid, market.condition_id.clone(), true));
                             reward_intents.push((ask, market.condition_id.clone(), true));
                         }
@@ -350,7 +376,7 @@ async fn main() -> Result<()> {
                         match router.place(&intent, &books).await {
                             Ok(result) => {
                                 // Only track position on confirmed fill, not just submission
-                                if result.paper_fill.is_some() {
+                                if result.paper_fill.is_some() || result.live_matched {
                                     mean_revert.open_position(
                                         strategy::mean_revert::MeanRevertPosition {
                                             token_id: intent.token_id.clone(),

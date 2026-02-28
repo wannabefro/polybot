@@ -61,4 +61,36 @@ src/
 | Max one-sided inventory | 1% NAV |
 | Daily loss stop | 3% NAV |
 
+## Environment Variables
+
+All variables use the `POLYBOT_` prefix. Only `POLYBOT_PRIVATE_KEY` is required.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POLYBOT_PRIVATE_KEY` | *(required)* | Hex-encoded Ethereum private key |
+| `POLYBOT_PAPER_MODE` | `true` | Paper trading (no real orders) |
+| `POLYBOT_NAV_USDC` | `1000.0` | Starting NAV in USDC |
+| `POLYBOT_CLOB_HOST` | `https://clob.polymarket.com` | CLOB API base URL |
+| `POLYBOT_GAMMA_HOST` | `https://gamma-api.polymarket.com` | Gamma API base URL |
+| `POLYBOT_CHAIN_ID` | `137` | Polygon chain ID |
+| `POLYBOT_MAX_NOTIONAL_PCT` | `0.02` | Max notional per market (fraction of NAV) |
+| `POLYBOT_MAX_GROSS_PCT` | `0.25` | Max gross exposure (fraction of NAV) |
+| `POLYBOT_MAX_INVENTORY_PCT` | `0.01` | Max one-sided inventory (fraction of NAV) |
+| `POLYBOT_DAILY_LOSS_PCT` | `0.03` | Daily loss stop (fraction of NAV) |
+| `POLYBOT_HEARTBEAT_SECS` | `5` | Heartbeat interval (seconds) |
+| `POLYBOT_GEOBLOCK_POLL_SECS` | `900` | Geoblock re-check interval (seconds) |
+| `POLYBOT_DISCOVERY_SECS` | `60` | Market discovery interval (seconds) |
+| `POLYBOT_RECON_SECS` | `45` | Position reconciliation interval (seconds) |
+| `POLYBOT_STALE_FEED_MS` | `1500` | Book staleness threshold (milliseconds) |
+| `POLYBOT_MR_MAX_NAV_PCT` | `0.005` | Mean-revert max position (fraction of NAV) |
+| `POLYBOT_MR_MIN_VOL_24H` | `10000.0` | Mean-revert minimum 24h volume |
+| `POLYBOT_HEDGE_TIMEOUT_MS` | `500` | Hedge SLA timeout (milliseconds) |
+| `POLYBOT_RATE_LIMIT_PS` | `70.0` | Rate limit (orders per second) |
+| `POLYBOT_LLM_POLL_SECS` | `10` | LLM signal poll interval (seconds) |
+| `POLYBOT_LLM_ENDPOINT` | *(none)* | Optional LLM inference endpoint |
+| `POLYBOT_METRICS_SECS` | `30` | Metrics log interval (seconds) |
+| `POLYBOT_MM_MIN_SIZE` | `5.0` | Minimum quote size (USDC) |
+| `POLYBOT_NR_STALE_SECS` | `10` | Neg-risk pair staleness threshold (seconds) |
+| `POLYBOT_QUOTE_TICK_SECS` | `5` | Quoting tick interval (seconds) |
+
 See `plan.md` for full architecture documentation.
