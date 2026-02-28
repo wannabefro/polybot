@@ -1,7 +1,7 @@
 //! Live NAV tracker — polls on-chain USDC balance and broadcasts updates.
 //!
-//! On Polygon, Polymarket uses USDC.e (bridged USDC) at
-//! `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174` (6 decimals).
+//! On Polygon, Polymarket uses native USDC at
+//! `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` (6 decimals).
 //!
 //! In paper mode, on-chain balance doesn't change so we supplement with
 //! the paper PnL from the risk engine.
@@ -14,8 +14,8 @@ use tokio::sync::watch;
 use tokio::time;
 use tracing::{debug, info, warn};
 
-/// Polygon USDC.e contract (used by Polymarket).
-const DEFAULT_USDC_CONTRACT: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+/// Polygon native USDC contract (used by Polymarket).
+const DEFAULT_USDC_CONTRACT: &str = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
 
 /// Default public Polygon RPC.
 const DEFAULT_POLYGON_RPC: &str = "https://polygon-bor-rpc.publicnode.com";
