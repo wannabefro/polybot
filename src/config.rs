@@ -85,33 +85,38 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
 
+/// Build a Config with safe defaults for testing (no env vars needed).
+/// Available in both unit and integration tests.
+#[doc(hidden)]
+pub fn test_config() -> Config {
+    Config {
+        clob_host: "https://clob.polymarket.com".into(),
+        gamma_host: "https://gamma-api.polymarket.com".into(),
+        chain_id: 137,
+        private_key: "deadbeef".into(),
+        paper_mode: true,
+        nav_usdc: 10_000.0,
+        max_notional_per_market: 0.02,
+        max_gross_exposure: 0.25,
+        max_one_sided_inventory: 0.01,
+        daily_loss_stop: 0.03,
+        heartbeat_interval: Duration::from_secs(5),
+        geoblock_poll_interval: Duration::from_secs(900),
+        discovery_interval: Duration::from_secs(60),
+        position_recon_interval: Duration::from_secs(45),
+        stale_feed_threshold: Duration::from_millis(1500),
+        mean_revert_max_nav_frac: 0.005,
+        mean_revert_min_volume_24h: 10_000.0,
+        hedge_timeout: Duration::from_millis(500),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
-    /// Shared test config used across all modules.
-    pub fn test_config() -> Config {
-        Config {
-            clob_host: "https://clob.polymarket.com".into(),
-            gamma_host: "https://gamma-api.polymarket.com".into(),
-            chain_id: 137,
-            private_key: "deadbeef".into(),
-            paper_mode: true,
-            nav_usdc: 10_000.0,
-            max_notional_per_market: 0.02,
-            max_gross_exposure: 0.25,
-            max_one_sided_inventory: 0.01,
-            daily_loss_stop: 0.03,
-            heartbeat_interval: Duration::from_secs(5),
-            geoblock_poll_interval: Duration::from_secs(900),
-            discovery_interval: Duration::from_secs(60),
-            position_recon_interval: Duration::from_secs(45),
-            stale_feed_threshold: Duration::from_millis(1500),
-            mean_revert_max_nav_frac: 0.005,
-            mean_revert_min_volume_24h: 10_000.0,
-            hedge_timeout: Duration::from_millis(500),
-        }
-    }
+    // Re-export for crate-internal tests
+    pub use super::test_config;
 
     #[test]
     fn nav_limit_calculation() {
@@ -133,8 +138,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn from_env_requires_private_key() {
-        // Ensure POLYBOT_PRIVATE_KEY is not set
+    fn from_env_behavior() {
+        // Test both missing-key error and successful parse sequentially
+        // to avoid env var race conditions in parallel test runner.
+
+        // Part 1: missing key → error
         std::env::remove_var("POLYBOT_PRIVATE_KEY");
         let result = Config::from_env();
         assert!(result.is_err());
@@ -142,17 +150,14 @@ pub(crate) mod tests {
             result.unwrap_err().to_string().contains("POLYBOT_PRIVATE_KEY"),
             "error should mention the missing env var"
         );
-    }
 
-    #[test]
-    fn from_env_with_private_key() {
-        // This test sets and then cleans up the env var
+        // Part 2: with key → success
         std::env::set_var("POLYBOT_PRIVATE_KEY", "0xdeadbeef");
         let result = Config::from_env();
         std::env::remove_var("POLYBOT_PRIVATE_KEY");
         let cfg = result.unwrap();
         assert_eq!(cfg.private_key, "0xdeadbeef");
-        assert!(cfg.paper_mode); // default is true
+        assert!(cfg.paper_mode);
         assert_eq!(cfg.chain_id, 137);
     }
 

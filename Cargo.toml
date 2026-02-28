@@ -44,3 +44,6 @@ tokio = { version = "1", features = ["test-util"] }
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "warn"
 todo = "warn"
+
+[dev-dependencies.wiremock]
+version = "0.6"
