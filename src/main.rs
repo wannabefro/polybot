@@ -30,6 +30,9 @@ use crate::strategy::reward::{HedgeTracker, UnhedgedFill};
 struct ActiveQuote {
     order_id: String,
     placed_at: std::time::Instant,
+    condition_id: String,
+    intent: crate::order::pipeline::OrderIntent,
+    needs_hedge: bool,
 }
 
 fn quote_key(intent: &crate::order::pipeline::OrderIntent) -> String {
@@ -171,10 +174,17 @@ async fn main() -> Result<()> {
     let mut mean_revert = MeanRevertState::new();
     let mut hedge_tracker = HedgeTracker::new(cfg.hedge_timeout);
     let mut active_quotes: HashMap<String, ActiveQuote> = HashMap::new();
+    let reward_enabled = cfg.nav_usdc >= cfg.reward_min_nav_usdc;
+    let mean_revert_enabled = cfg.nav_usdc >= cfg.mean_revert_min_nav_usdc;
+    let max_markets = cfg.max_active_markets();
 
     info!(
         paper_mode = cfg.paper_mode,
         nav = cfg.nav_usdc,
+        small_account = cfg.is_small_account(),
+        reward_enabled,
+        mean_revert_enabled,
+        max_active_markets = max_markets,
         "polybot ready — entering event loop"
     );
 
@@ -343,14 +353,19 @@ async fn main() -> Result<()> {
                 // ── Rebate MM quoting (concurrent dispatch) ──
                 {
                     let mut rebate_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool, String)> = Vec::new();
+                    let mut mm_count = 0usize;
                     for market in universe.iter() {
                         // Skip rewards-active markets — reward capture handles them
                         if market.rewards_active {
                             continue;
                         }
+                        if mm_count >= max_markets {
+                            break;
+                        }
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;
                         }
+                        mm_count += 1;
                         let quotes = strategy::rebate_mm::generate_quotes(
                             &cfg, market, &books, &risk_engine,
                         );
@@ -388,6 +403,9 @@ async fn main() -> Result<()> {
                                         ActiveQuote {
                                             order_id: result.order_id,
                                             placed_at: std::time::Instant::now(),
+                                            condition_id: cond_id.clone(),
+                                            intent: intent.clone(),
+                                            needs_hedge: *needs_hedge,
                                         },
                                     );
                                 }
@@ -399,12 +417,17 @@ async fn main() -> Result<()> {
                 }
 
                 // ── Reward capture quoting (concurrent dispatch) ──
-                {
+                if reward_enabled {
                     let mut reward_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool, String)> = Vec::new();
+                    let mut rw_count = 0usize;
                     for market in universe.iter().filter(|m| m.rewards_active) {
+                        if rw_count >= max_markets {
+                            break;
+                        }
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;
                         }
+                        rw_count += 1;
                         let quotes = strategy::reward::evaluate_reward_quote(
                             &cfg, market, &books, &risk_engine,
                         );
@@ -442,6 +465,9 @@ async fn main() -> Result<()> {
                                         ActiveQuote {
                                             order_id: result.order_id,
                                             placed_at: std::time::Instant::now(),
+                                            condition_id: cond_id.clone(),
+                                            intent: intent.clone(),
+                                            needs_hedge: *needs_hedge,
                                         },
                                     );
                                 }
@@ -452,93 +478,125 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // ── Mean reversion ──
-                // Record prices for SMA
-                for market in universe.iter() {
-                    for token in &market.tokens {
-                        if let Some(book) = books.get(&token.token_id) {
-                            if let Some(mid) = book.mid_price() {
-                                mean_revert.record_price(&token.token_id, mid);
-                            }
-                        }
-                    }
-                }
-
-                // Check stop exits
-                for exit in mean_revert.positions_to_close(&books) {
-                    info!(token = %exit.token_id, "mean-revert: stop triggered");
-                    let Some(condition_id) = mean_revert
-                        .open_positions()
-                        .iter()
-                        .find(|p| p.token_id == exit.token_id)
-                        .map(|p| p.condition_id.clone())
-                    else {
-                        warn!(token = %exit.token_id, "mean-revert: missing condition id for exit");
-                        continue;
-                    };
-
-                    match router.place(&exit, &books).await {
-                        Ok(result) => {
-                            process_fill(
-                                &result,
-                                &exit,
-                                &condition_id,
-                                &risk_engine,
-                                &mut hedge_tracker,
-                                &metrics,
-                                false,
-                            );
-                            if result.paper_fill.is_some() || result.live_matched {
-                                mean_revert.remove_position(&exit.token_id);
-                            } else {
-                                warn!(token = %exit.token_id, "mean-revert: exit not filled; position retained");
-                            }
-                        }
-                        Err(e) => {
-                            error!(err = %e, "mean-revert exit failed");
-                        }
-                    }
-                }
-
-                // New entries
-                for market in universe.iter() {
-                    if rate_limiter.try_acquire().is_err() {
-                        break;
-                    }
-                    if let Some(mut intent) = strategy::mean_revert::evaluate_entry(
-                        &cfg, market, &books, &risk_engine, &mean_revert,
-                    ) {
-                        if !scale_intent_size(&mut intent, risk_multiplier, market.min_order_size) {
+                // Paper mode: simulate passive fills on resting quotes using latest books.
+                if let Some(engine) = router.paper_engine() {
+                    for fill in engine.simulate_resting_fills(&books) {
+                        let Some((key, meta)) = active_quotes
+                            .iter()
+                            .find(|(_, q)| q.order_id == fill.paper_order_id)
+                            .map(|(k, q)| (k.clone(), q.clone()))
+                        else {
                             continue;
+                        };
+
+                        let result = crate::order::router::PlaceResult {
+                            order_id: fill.paper_order_id.clone(),
+                            paper_fill: Some(fill),
+                            live_matched: false,
+                            live_intent: None,
+                        };
+                        process_fill(
+                            &result,
+                            &meta.intent,
+                            &meta.condition_id,
+                            &risk_engine,
+                            &mut hedge_tracker,
+                            &metrics,
+                            meta.needs_hedge,
+                        );
+                        active_quotes.remove(&key);
+                    }
+                }
+
+                // ── Mean reversion ──
+                if mean_revert_enabled {
+                    // Record prices for SMA
+                    for market in universe.iter() {
+                        for token in &market.tokens {
+                            if let Some(book) = books.get(&token.token_id) {
+                                if let Some(mid) = book.mid_price() {
+                                    mean_revert.record_price(&token.token_id, mid);
+                                }
+                            }
                         }
-                        match router.place(&intent, &books).await {
+                    }
+
+                    // Check stop exits
+                    for exit in mean_revert.positions_to_close(&books) {
+                        info!(token = %exit.token_id, "mean-revert: stop triggered");
+                        let Some(condition_id) = mean_revert
+                            .open_positions()
+                            .iter()
+                            .find(|p| p.token_id == exit.token_id)
+                            .map(|p| p.condition_id.clone())
+                        else {
+                            warn!(token = %exit.token_id, "mean-revert: missing condition id for exit");
+                            continue;
+                        };
+
+                        match router.place(&exit, &books).await {
                             Ok(result) => {
                                 process_fill(
                                     &result,
-                                    &intent,
-                                    &market.condition_id,
+                                    &exit,
+                                    &condition_id,
                                     &risk_engine,
                                     &mut hedge_tracker,
                                     &metrics,
                                     false,
                                 );
-                                // Only track position on confirmed fill, not just submission
                                 if result.paper_fill.is_some() || result.live_matched {
-                                    mean_revert.open_position(
-                                        strategy::mean_revert::MeanRevertPosition {
-                                            condition_id: market.condition_id.clone(),
-                                            token_id: intent.token_id.clone(),
-                                            side: intent.side,
-                                            entry_price: intent.price,
-                                            size: intent.size,
-                                            opened_at: std::time::Instant::now(),
-                                            neg_risk: intent.neg_risk,
-                                            fee_rate_bps: intent.fee_rate_bps,
-                                        },
-                                    );
+                                    mean_revert.remove_position(&exit.token_id);
+                                } else {
+                                    warn!(token = %exit.token_id, "mean-revert: exit not filled; position retained");
                                 }
                             }
-                            Err(e) => error!(err = %e, "mean-revert entry failed"),
+                            Err(e) => {
+                                error!(err = %e, "mean-revert exit failed");
+                            }
+                        }
+                    }
+
+                    // New entries
+                    for market in universe.iter() {
+                        if rate_limiter.try_acquire().is_err() {
+                            break;
+                        }
+                        if let Some(mut intent) = strategy::mean_revert::evaluate_entry(
+                            &cfg, market, &books, &risk_engine, &mean_revert,
+                        ) {
+                            if !scale_intent_size(&mut intent, risk_multiplier, market.min_order_size) {
+                                continue;
+                            }
+                            match router.place(&intent, &books).await {
+                                Ok(result) => {
+                                    process_fill(
+                                        &result,
+                                        &intent,
+                                        &market.condition_id,
+                                        &risk_engine,
+                                        &mut hedge_tracker,
+                                        &metrics,
+                                        false,
+                                    );
+                                    // Only track position on confirmed fill, not just submission
+                                    if result.paper_fill.is_some() || result.live_matched {
+                                        mean_revert.open_position(
+                                            strategy::mean_revert::MeanRevertPosition {
+                                                condition_id: market.condition_id.clone(),
+                                                token_id: intent.token_id.clone(),
+                                                side: intent.side,
+                                                entry_price: intent.price,
+                                                size: intent.size,
+                                                opened_at: std::time::Instant::now(),
+                                                neg_risk: intent.neg_risk,
+                                                fee_rate_bps: intent.fee_rate_bps,
+                                            },
+                                        );
+                                    }
+                                }
+                                Err(e) => error!(err = %e, "mean-revert entry failed"),
+                            }
                         }
                     }
                 }

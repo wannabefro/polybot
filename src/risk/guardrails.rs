@@ -53,10 +53,18 @@ const CANCEL_FAILURE_HALT_THRESHOLD: u32 = 3;
 
 impl RiskEngine {
     pub fn new(config: Config) -> Arc<Self> {
-        let limit_per_market = safe_nav_decimal(config.nav_usdc, config.max_notional_per_market, "per_market");
-        let limit_gross = safe_nav_decimal(config.nav_usdc, config.max_gross_exposure, "gross");
+        let limit_per_market = safe_nav_decimal(
+            config.nav_usdc,
+            config.effective_max_notional_per_market(),
+            "per_market",
+        );
+        let limit_gross = safe_nav_decimal(config.nav_usdc, config.effective_max_gross_exposure(), "gross");
         let limit_daily_loss = safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "daily_loss");
-        let limit_inventory = safe_nav_decimal(config.nav_usdc, config.max_one_sided_inventory, "inventory");
+        let limit_inventory = safe_nav_decimal(
+            config.nav_usdc,
+            config.effective_max_one_sided_inventory(),
+            "inventory",
+        );
 
         Arc::new(Self {
             limit_per_market,
@@ -587,10 +595,10 @@ mod tests {
     fn pre_computed_limits_match_config() {
         let config = test_config();
         let engine = RiskEngine::new(config.clone());
-        assert_eq!(engine.limit_per_market, safe_nav_decimal(config.nav_usdc, config.max_notional_per_market, "pm"));
-        assert_eq!(engine.limit_gross, safe_nav_decimal(config.nav_usdc, config.max_gross_exposure, "ge"));
+        assert_eq!(engine.limit_per_market, safe_nav_decimal(config.nav_usdc, config.effective_max_notional_per_market(), "pm"));
+        assert_eq!(engine.limit_gross, safe_nav_decimal(config.nav_usdc, config.effective_max_gross_exposure(), "ge"));
         assert_eq!(engine.limit_daily_loss, safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "dl"));
-        assert_eq!(engine.limit_inventory, safe_nav_decimal(config.nav_usdc, config.max_one_sided_inventory, "inv"));
+        assert_eq!(engine.limit_inventory, safe_nav_decimal(config.nav_usdc, config.effective_max_one_sided_inventory(), "inv"));
     }
 
     #[test]

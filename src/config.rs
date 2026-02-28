@@ -42,6 +42,12 @@ pub struct Config {
     pub llm_poll_interval: Duration,
     pub metrics_interval: Duration,
     pub mm_min_size: f64,
+    pub reward_min_size: f64,
+    pub reward_min_nav_usdc: f64,
+    pub mean_revert_min_nav_usdc: f64,
+    pub small_account_nav_threshold: f64,
+    pub small_account_min_per_market_pct: f64,
+    pub small_account_min_inventory_pct: f64,
     pub neg_risk_stale_secs: u64,
     pub quote_tick_secs: u64,
     #[allow(dead_code)]
@@ -90,7 +96,13 @@ impl Config {
             metrics_interval: Duration::from_secs(
                 env_or("POLYBOT_METRICS_SECS", "30").parse()?,
             ),
-            mm_min_size: env_or("POLYBOT_MM_MIN_SIZE", "5.0").parse()?,
+            mm_min_size: env_or("POLYBOT_MM_MIN_SIZE", "1.0").parse()?,
+            reward_min_size: env_or("POLYBOT_REWARD_MIN_SIZE", "1.0").parse()?,
+            reward_min_nav_usdc: env_or("POLYBOT_REWARD_MIN_NAV_USDC", "25.0").parse()?,
+            mean_revert_min_nav_usdc: env_or("POLYBOT_MR_MIN_NAV_USDC", "100.0").parse()?,
+            small_account_nav_threshold: env_or("POLYBOT_SMALL_ACCOUNT_NAV_THRESHOLD", "500.0").parse()?,
+            small_account_min_per_market_pct: env_or("POLYBOT_SMALL_MIN_PER_MARKET_PCT", "0.08").parse()?,
+            small_account_min_inventory_pct: env_or("POLYBOT_SMALL_MIN_INVENTORY_PCT", "0.06").parse()?,
             neg_risk_stale_secs: env_or("POLYBOT_NR_STALE_SECS", "10").parse()?,
             quote_tick_secs: env_or("POLYBOT_QUOTE_TICK_SECS", "5").parse()?,
             quote_max_age: Duration::from_secs(
@@ -103,6 +115,53 @@ impl Config {
     /// Absolute USDC limit for a given NAV fraction.
     pub fn nav_limit(&self, fraction: f64) -> f64 {
         self.nav_usdc * fraction
+    }
+
+    /// True when account NAV is in the small-account bucket.
+    pub fn is_small_account(&self) -> bool {
+        self.nav_usdc <= self.small_account_nav_threshold
+    }
+
+    /// Effective per-market cap fraction used by the runtime.
+    pub fn effective_max_notional_per_market(&self) -> f64 {
+        if self.is_small_account() {
+            self.max_notional_per_market
+                .max(self.small_account_min_per_market_pct)
+        } else {
+            self.max_notional_per_market
+        }
+    }
+
+    /// Effective one-sided inventory cap fraction used by the runtime.
+    pub fn effective_max_one_sided_inventory(&self) -> f64 {
+        if self.is_small_account() {
+            self.max_one_sided_inventory
+                .max(self.small_account_min_inventory_pct)
+        } else {
+            self.max_one_sided_inventory
+        }
+    }
+
+    /// Effective gross exposure cap — raised for small accounts to allow more markets.
+    pub fn effective_max_gross_exposure(&self) -> f64 {
+        if self.is_small_account() {
+            self.max_gross_exposure.max(0.40) // 40% floor for small accounts
+        } else {
+            self.max_gross_exposure
+        }
+    }
+
+    /// Max markets to actively quote given NAV — avoids spreading too thin.
+    pub fn max_active_markets(&self) -> usize {
+        if self.nav_usdc < 100.0 {
+            5
+        } else if self.nav_usdc < 250.0 {
+            10
+        } else if self.nav_usdc < 1000.0 {
+            25
+        } else {
+            usize::MAX // no limit
+        }
     }
 }
 
@@ -137,7 +196,13 @@ pub fn test_config() -> Config {
         rate_limit_per_sec: 70.0,
         llm_poll_interval: Duration::from_secs(10),
         metrics_interval: Duration::from_secs(30),
-        mm_min_size: 5.0,
+        mm_min_size: 1.0,
+        reward_min_size: 1.0,
+        reward_min_nav_usdc: 25.0,
+        mean_revert_min_nav_usdc: 100.0,
+        small_account_nav_threshold: 500.0,
+        small_account_min_per_market_pct: 0.08,
+        small_account_min_inventory_pct: 0.06,
         neg_risk_stale_secs: 10,
         quote_tick_secs: 5,
         quote_max_age: Duration::from_secs(20),
@@ -224,5 +289,39 @@ pub(crate) mod tests {
         assert_eq!(cfg.max_one_sided_inventory, 0.01);  // 1%
         assert_eq!(cfg.daily_loss_stop, 0.03);           // 3%
         assert_eq!(cfg.mean_revert_max_nav_frac, 0.005); // 0.5%
+    }
+
+    #[test]
+    fn effective_caps_increase_for_small_accounts() {
+        let mut cfg = test_config();
+        cfg.nav_usdc = 100.0;
+        assert!(cfg.is_small_account());
+        assert_eq!(cfg.effective_max_notional_per_market(), 0.08);
+        assert_eq!(cfg.effective_max_one_sided_inventory(), 0.06);
+        assert_eq!(cfg.effective_max_gross_exposure(), 0.40);
+        assert_eq!(cfg.max_active_markets(), 10);
+    }
+
+    #[test]
+    fn effective_caps_unchanged_for_large_accounts() {
+        let cfg = test_config();
+        assert!(!cfg.is_small_account());
+        assert_eq!(cfg.effective_max_notional_per_market(), cfg.max_notional_per_market);
+        assert_eq!(cfg.effective_max_one_sided_inventory(), cfg.max_one_sided_inventory);
+        assert_eq!(cfg.effective_max_gross_exposure(), cfg.max_gross_exposure);
+        assert_eq!(cfg.max_active_markets(), usize::MAX);
+    }
+
+    #[test]
+    fn max_active_markets_tiers() {
+        let mut cfg = test_config();
+        cfg.nav_usdc = 50.0;
+        assert_eq!(cfg.max_active_markets(), 5);
+        cfg.nav_usdc = 200.0;
+        assert_eq!(cfg.max_active_markets(), 10);
+        cfg.nav_usdc = 500.0;
+        assert_eq!(cfg.max_active_markets(), 25);
+        cfg.nav_usdc = 5000.0;
+        assert_eq!(cfg.max_active_markets(), usize::MAX);
     }
 }

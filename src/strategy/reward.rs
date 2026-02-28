@@ -134,7 +134,7 @@ impl HedgeTracker {
 ///
 /// Returns a Vec of (bid, ask) pairs — one per quotable token.
 pub fn evaluate_reward_quote(
-    _config: &Config,
+    config: &Config,
     market: &TradableMarket,
     books: &BookStore,
     risk: &RiskEngine,
@@ -149,7 +149,7 @@ pub fn evaluate_reward_quote(
 
     let mut pairs = Vec::new();
     for token in &market.tokens {
-        if let Some(pair) = evaluate_token_reward(market, token, books, risk) {
+        if let Some(pair) = evaluate_token_reward(config, market, token, books, risk) {
             pairs.push(pair);
         }
     }
@@ -157,6 +157,7 @@ pub fn evaluate_reward_quote(
 }
 
 fn evaluate_token_reward(
+    config: &Config,
     market: &TradableMarket,
     token: &crate::market::discovery::TokenInfo,
     books: &BookStore,
@@ -208,7 +209,17 @@ fn evaluate_token_reward(
 
     // Use larger size for reward qualification; respect rewards_min_size
     let rewards_min = market.rewards_min_size.unwrap_or(Decimal::ZERO);
-    let size = market.min_order_size.max(rewards_min).max(dec!(10));
+    let reward_min = Decimal::from_f64_retain(config.reward_min_size).unwrap_or(dec!(3));
+    let mut size = market.min_order_size.max(rewards_min).max(reward_min);
+    let inventory_cap_notional = Decimal::from_f64_retain(
+        config.nav_limit(config.effective_max_one_sided_inventory())
+    ).unwrap_or(Decimal::ZERO);
+    if !mid.is_zero() && inventory_cap_notional > Decimal::ZERO {
+        size = size.min(inventory_cap_notional / mid);
+    }
+    if size < market.min_order_size {
+        return None;
+    }
 
     let bid_intent = OrderIntent {
         token_id: token.token_id.clone(),

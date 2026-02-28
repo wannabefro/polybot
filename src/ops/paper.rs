@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use rand::Rng;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use tracing::{debug, info};
 
 use crate::market::book::BookStore;
@@ -127,6 +129,55 @@ impl PaperEngine {
         self.open_orders.read().len()
     }
 
+    /// Simulate passive fills for resting orders in paper mode.
+    ///
+    /// - Crossing orders are filled deterministically.
+    /// - Top-of-book resting orders may fill probabilistically.
+    pub fn simulate_resting_fills(&self, books: &BookStore) -> Vec<PaperFill> {
+        let open_orders: Vec<(String, OrderIntent)> = self
+            .open_orders
+            .read()
+            .iter()
+            .map(|(id, intent)| (id.clone(), intent.clone()))
+            .collect();
+
+        let mut rng = rand::rng();
+        let mut filled_ids = Vec::new();
+        let mut fills = Vec::new();
+
+        for (order_id, intent) in open_orders {
+            let Some(book) = books.get(&intent.token_id) else {
+                continue;
+            };
+            let Some(fill_prob) = resting_fill_probability(&intent, &book) else {
+                continue;
+            };
+            if rng.random::<f64>() >= fill_prob {
+                continue;
+            }
+
+            fills.push(PaperFill {
+                paper_order_id: order_id.clone(),
+                token_id: intent.token_id.clone(),
+                side: format!("{:?}", intent.side),
+                price: intent.price,
+                size: intent.size,
+                notional: intent.price * intent.size,
+            });
+            filled_ids.push(order_id);
+        }
+
+        if !filled_ids.is_empty() {
+            let mut orders = self.open_orders.write();
+            for id in &filled_ids {
+                orders.remove(id);
+            }
+            self.fills.write().extend(fills.clone());
+        }
+
+        fills
+    }
+
     /// Total paper P&L (simplified: sum of buy notionals as negative, sell as positive).
     #[allow(dead_code)]
     pub fn net_notional(&self) -> Decimal {
@@ -142,6 +193,54 @@ impl PaperEngine {
             })
             .sum()
     }
+}
+
+fn resting_fill_probability(
+    intent: &OrderIntent,
+    book: &crate::market::book::LocalBook,
+) -> Option<f64> {
+    let best_bid = book.bids.best()?;
+    let best_ask = book.asks.best()?;
+
+    // Deterministic fill when market moves through our resting price.
+    if matches!(intent.side, polymarket_client_sdk::clob::types::Side::Buy) && intent.price >= best_ask.price {
+        return Some(1.0);
+    }
+    if matches!(intent.side, polymarket_client_sdk::clob::types::Side::Sell) && intent.price <= best_bid.price {
+        return Some(1.0);
+    }
+
+    let spread = (best_ask.price - best_bid.price)
+        .to_f64()
+        .unwrap_or(0.01)
+        .max(0.0001);
+
+    let (distance, touch_size) = match intent.side {
+        polymarket_client_sdk::clob::types::Side::Buy => (
+            (best_bid.price - intent.price)
+                .max(Decimal::ZERO)
+                .to_f64()
+                .unwrap_or(spread),
+            best_bid.size,
+        ),
+        polymarket_client_sdk::clob::types::Side::Sell => (
+            (intent.price - best_ask.price)
+                .max(Decimal::ZERO)
+                .to_f64()
+                .unwrap_or(spread),
+            best_ask.size,
+        ),
+        _ => return None,
+    };
+
+    // Closer to touch and smaller size vs touch liquidity => higher fill odds.
+    let quality = (1.0 - (distance / spread).min(1.0)).max(0.0);
+    let size_ratio = (intent.size / (touch_size + Decimal::ONE))
+        .to_f64()
+        .unwrap_or(1.0)
+        .min(1.0);
+
+    Some((0.01 + 0.05 * quality - 0.03 * size_ratio).clamp(0.0, 0.2))
 }
 
 #[cfg(test)]
@@ -290,5 +389,21 @@ mod tests {
         assert!(fill.is_none());
         assert_eq!(engine.open_order_count(), 1);
         assert_eq!(engine.fills().len(), 0);
+    }
+
+    #[test]
+    fn simulate_resting_fills_when_book_crosses() {
+        let engine = PaperEngine::new();
+        let books = make_book(dec!(0.48), dec!(0.52));
+
+        let (order_id, fill) = engine.place_order(&intent(Side::Buy, dec!(0.49), true), &books);
+        assert!(fill.is_none());
+        assert_eq!(engine.open_order_count(), 1);
+
+        let crossed = make_book(dec!(0.47), dec!(0.49));
+        let fills = engine.simulate_resting_fills(&crossed);
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].paper_order_id, order_id);
+        assert_eq!(engine.open_order_count(), 0);
     }
 }

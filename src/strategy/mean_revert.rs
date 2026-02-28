@@ -258,8 +258,15 @@ pub fn evaluate_entry(
         Side::Buy
     };
 
-    // Size: capped at mean_revert_max_nav_frac * NAV
-    let max_notional = Decimal::try_from(config.nav_limit(config.mean_revert_max_nav_frac)).ok()?;
+    // Size: capped by strategy budget and one-sided inventory budget.
+    let strategy_notional = Decimal::try_from(config.nav_limit(config.mean_revert_max_nav_frac)).ok()?;
+    let inventory_notional = Decimal::try_from(
+        config.nav_limit(config.effective_max_one_sided_inventory())
+    ).ok()?;
+    let max_notional = strategy_notional.min(inventory_notional);
+    if max_notional <= Decimal::ZERO {
+        return None;
+    }
     let size = (max_notional / mid).min(dec!(100)); // cap shares
 
     if size < market.min_order_size {
