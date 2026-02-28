@@ -160,6 +160,11 @@ fn parse_volume_from_gamma_body(body: &Value, condition_id: &str) -> Option<f64>
     }
 }
 
+/// Max markets to enrich via Gamma (avoid rate limits on 35k+ universe).
+const GAMMA_ENRICH_LIMIT: usize = 600;
+/// Concurrent Gamma requests (keep low to avoid 429s).
+const GAMMA_CONCURRENCY: usize = 4;
+
 pub async fn enrich_volume(gamma_host: &str, markets: &mut [TradableMarket]) {
     if markets.is_empty() {
         return;
@@ -167,7 +172,7 @@ pub async fn enrich_volume(gamma_host: &str, markets: &mut [TradableMarket]) {
 
     let host = gamma_host.trim_end_matches('/').to_string();
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
         .build()
     {
         Ok(c) => c,
@@ -177,33 +182,52 @@ pub async fn enrich_volume(gamma_host: &str, markets: &mut [TradableMarket]) {
         }
     };
 
-    let ids: Vec<String> = markets.iter().map(|m| m.condition_id.clone()).collect();
-    let mut stream = futures::stream::iter(ids.into_iter().enumerate().map(|(idx, condition_id)| {
+    // Only enrich top N markets (sorted by rewards first since those are what we trade).
+    let enrich_count = markets.len().min(GAMMA_ENRICH_LIMIT);
+    let ids: Vec<(usize, String)> = markets[..enrich_count]
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (i, m.condition_id.clone()))
+        .collect();
+
+    let mut stream = futures::stream::iter(ids.into_iter().map(|(idx, condition_id)| {
         let client = client.clone();
         let host = host.clone();
         async move {
             let url = format!("{host}/markets");
+            // Try once; on 429 back off and retry once.
             let resp = client
-                .get(url)
+                .get(&url)
                 .query(&[("id", condition_id.as_str())])
                 .send()
                 .await;
+            let resp = match resp {
+                Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    client
+                        .get(&url)
+                        .query(&[("id", condition_id.as_str())])
+                        .send()
+                        .await
+                }
+                other => other,
+            };
             (idx, condition_id, resp)
         }
     }))
-    .buffer_unordered(16);
+    .buffer_unordered(GAMMA_CONCURRENCY);
 
+    let mut enriched = 0u32;
+    let mut rate_limited = 0u32;
     while let Some((idx, condition_id, resp)) = stream.next().await {
         let Ok(resp) = resp else {
-            warn!(condition_id = %condition_id, "discovery: gamma volume request failed");
             continue;
         };
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            rate_limited += 1;
+            continue;
+        }
         if !resp.status().is_success() {
-            warn!(
-                condition_id = %condition_id,
-                status = %resp.status(),
-                "discovery: gamma volume request non-success"
-            );
             continue;
         }
 
@@ -211,13 +235,16 @@ pub async fn enrich_volume(gamma_host: &str, markets: &mut [TradableMarket]) {
             Ok(body) => {
                 if let Some(volume) = parse_volume_from_gamma_body(&body, &condition_id) {
                     markets[idx].volume_24h = volume;
+                    enriched += 1;
                 }
             }
-            Err(e) => {
-                warn!(err = %e, condition_id = %condition_id, "discovery: gamma volume parse failed");
-            }
+            Err(_) => {}
         }
     }
+    if rate_limited > 0 {
+        warn!(rate_limited, "discovery: gamma enrichment hit rate limits");
+    }
+    info!(enriched, total = enrich_count, "discovery: volume enrichment complete");
 }
 
 /// Spawn the discovery loop. Returns a watch receiver for the current universe.
