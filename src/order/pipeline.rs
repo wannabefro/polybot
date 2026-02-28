@@ -57,7 +57,7 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
         .token_id(token_id)
         .side(intent.side)
         .price(intent.price)
-        .size(intent.size)
+        .size(intent.size.trunc_with_scale(2)) // max 2 decimal places (lot size)
         .order_type(intent.order_type.clone())
         .post_only(intent.post_only)
         .build()
