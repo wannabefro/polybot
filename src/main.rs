@@ -170,6 +170,12 @@ async fn main() -> Result<()> {
     let router = OrderRouter::new(&cfg, auth_ctx.clone());
     let metrics = Metrics::new();
 
+    // ── Startup reconciliation: cancel stale orders from prior run ──
+    match router.cancel_all().await {
+        Ok(()) => info!("startup: cancelled all pre-existing orders"),
+        Err(e) => warn!(err = %e, "startup: cancel-all failed (may have no open orders)"),
+    }
+
     // ── Phase 6: Live NAV tracker ──────────────────────────────
     let wallet_address = format!("{:#x}", auth_ctx.signer.address());
     let (_nav_handle, mut nav_rx) = ops::nav::spawn(
