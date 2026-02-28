@@ -47,7 +47,7 @@ fn passes_filter(
 }
 
 /// Fetch all active markets from the CLOB endpoint, paginating through cursors.
-async fn fetch_all_markets(client: &AuthClient) -> Result<Vec<TradableMarket>> {
+async fn fetch_all_markets(client: &AuthClient, gamma_host: &str) -> Result<Vec<TradableMarket>> {
     let mut results = Vec::new();
     let mut cursor: Option<String> = None;
 
@@ -115,7 +115,17 @@ async fn fetch_all_markets(client: &AuthClient) -> Result<Vec<TradableMarket>> {
         cursor = Some(page.next_cursor);
     }
 
+    enrich_volume(gamma_host, &mut results).await;
+
     Ok(results)
+}
+///
+/// TODO: actual Gamma API call pattern: `GET {gamma_host}/markets?id=<condition_id>`
+/// For now this is a stub that can be wired up once the Gamma client is available.
+pub async fn enrich_volume(_gamma_host: &str, _markets: &mut [TradableMarket]) {
+    // Stubbed — each market's volume_24h stays at its current value.
+    // Future: for each market, call GET /markets?id=<condition_id> and parse
+    // the `volume24hr` field from the Gamma API response.
 }
 
 /// Spawn the discovery loop. Returns a watch receiver for the current universe.
@@ -124,13 +134,14 @@ pub fn spawn(
     client: AuthClient,
 ) -> (tokio::task::JoinHandle<()>, watch::Receiver<Arc<Vec<TradableMarket>>>) {
     let interval = config.discovery_interval;
+    let gamma_host = config.gamma_host.clone();
     let (tx, rx) = watch::channel(Arc::new(Vec::new()));
 
     let handle = tokio::spawn(async move {
         let mut ticker = time::interval(interval);
         loop {
             ticker.tick().await;
-            match fetch_all_markets(&client).await {
+            match fetch_all_markets(&client, &gamma_host).await {
                 Ok(markets) => {
                     info!(count = markets.len(), "discovery: refreshed tradable universe");
                     let _ = tx.send(Arc::new(markets));
@@ -143,4 +154,16 @@ pub fn spawn(
     });
 
     (handle, rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn enrich_volume_empty_input_ok() {
+        let mut markets: Vec<TradableMarket> = Vec::new();
+        enrich_volume("https://gamma-api.polymarket.com", &mut markets).await;
+        assert!(markets.is_empty());
+    }
 }

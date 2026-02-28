@@ -88,13 +88,13 @@ async fn main() -> Result<()> {
 
     // ── Phase 4: Risk + intelligence ───────────────────────────
     let risk_engine = RiskEngine::new(cfg.clone());
-    let rate_limiter = risk::rate_limit::RateLimiter::new(70.0);
+    let rate_limiter = risk::rate_limit::RateLimiter::new(cfg.rate_limit_per_sec);
     let heartbeat = order::heartbeat::HeartbeatMonitor::new(cfg.heartbeat_interval);
 
     let (signal_tx, signal_rx) = signal::create();
     let _llm_handle = intelligence::llm::spawn(
         intelligence::llm::LlmConfig {
-            poll_interval: Duration::from_secs(10),
+            poll_interval: cfg.llm_poll_interval,
             timeout: Duration::from_millis(1500),
             endpoint: std::env::var("POLYBOT_LLM_ENDPOINT").ok(),
         },
@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
     // ── Phase 5: Order routing + metrics ───────────────────────
     let router = OrderRouter::new(&cfg, auth_ctx);
     let metrics = Metrics::new();
-    let _metrics_handle = ops::metrics::spawn_logger(metrics.clone(), Duration::from_secs(30));
+    let _metrics_handle = ops::metrics::spawn_logger(metrics.clone(), cfg.metrics_interval);
 
     // Strategy state
     let mut mean_revert = MeanRevertState::new();
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
     );
 
     // ── Main event loop ────────────────────────────────────────
-    let mut quote_tick = time::interval(Duration::from_secs(5));
+    let mut quote_tick = time::interval(Duration::from_secs(cfg.quote_tick_secs));
     let mut daily_reset = time::interval(Duration::from_secs(86400));
 
     loop {
@@ -232,7 +232,7 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    let stale_threshold = Duration::from_secs(10);
+                    let stale_threshold = Duration::from_secs(cfg.neg_risk_stale_secs);
                     let mut stale_set = std::collections::HashSet::new();
                     for (_, token_ids) in &groups {
                         let any_stale = token_ids.iter().any(|tid| {
@@ -247,64 +247,66 @@ async fn main() -> Result<()> {
                     stale_set
                 };
 
-                // ── Rebate MM quoting ──
-                for market in universe.iter() {
-                    if rate_limiter.try_acquire().is_err() {
-                        break;
-                    }
-                    // Gap #6: skip neg-risk tokens with stale pair data
-                    if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
-                        continue;
-                    }
-                    if let Some((bid, ask)) = strategy::rebate_mm::generate_quotes(
-                        &cfg, market, &books, &risk_engine,
-                    ) {
-                        match router.place(&bid, &books).await {
-                            Ok(result) => {
-                                metrics.inc_quotes_sent();
-                                process_fill(&result, &bid, &market.condition_id, &risk_engine, &mut hedge_tracker, &metrics, false);
-                                risk_engine.reset_cancel_failures();
-                            }
-                            Err(e) => error!(err = %e, "bid place failed"),
+                // ── Rebate MM quoting (concurrent dispatch) ──
+                {
+                    let mut rebate_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool)> = Vec::new();
+                    for market in universe.iter() {
+                        if rate_limiter.try_acquire().is_err() {
+                            break;
                         }
-                        match router.place(&ask, &books).await {
+                        if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
+                            continue;
+                        }
+                        if let Some((bid, ask)) = strategy::rebate_mm::generate_quotes(
+                            &cfg, market, &books, &risk_engine,
+                        ) {
+                            rebate_intents.push((bid, market.condition_id.clone(), false));
+                            rebate_intents.push((ask, market.condition_id.clone(), false));
+                        }
+                    }
+                    let results: Vec<_> = futures::future::join_all(
+                        rebate_intents.iter().map(|(intent, _, _)| router.place(intent, &books))
+                    ).await;
+                    for (res, (intent, cond_id, needs_hedge)) in results.into_iter().zip(rebate_intents.iter()) {
+                        match res {
                             Ok(result) => {
                                 metrics.inc_quotes_sent();
-                                process_fill(&result, &ask, &market.condition_id, &risk_engine, &mut hedge_tracker, &metrics, false);
+                                process_fill(&result, intent, cond_id, &risk_engine, &mut hedge_tracker, &metrics, *needs_hedge);
                                 risk_engine.reset_cancel_failures();
                             }
-                            Err(e) => error!(err = %e, "ask place failed"),
+                            Err(e) => error!(err = %e, "rebate-mm place failed"),
                         }
                     }
                 }
 
-                // ── Reward capture quoting ──
-                for market in universe.iter().filter(|m| m.rewards_active) {
-                    if rate_limiter.try_acquire().is_err() {
-                        break;
-                    }
-                    if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
-                        continue;
-                    }
-                    if let Some((bid, ask)) = strategy::reward::evaluate_reward_quote(
-                        &cfg, market, &books, &risk_engine,
-                    ) {
-                        match router.place(&bid, &books).await {
-                            Ok(result) => {
-                                metrics.inc_quotes_sent();
-                                // Reward fills need hedging
-                                process_fill(&result, &bid, &market.condition_id, &risk_engine, &mut hedge_tracker, &metrics, true);
-                                risk_engine.reset_cancel_failures();
-                            }
-                            Err(e) => error!(err = %e, "reward bid failed"),
+                // ── Reward capture quoting (concurrent dispatch) ──
+                {
+                    let mut reward_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool)> = Vec::new();
+                    for market in universe.iter().filter(|m| m.rewards_active) {
+                        if rate_limiter.try_acquire().is_err() {
+                            break;
                         }
-                        match router.place(&ask, &books).await {
+                        if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
+                            continue;
+                        }
+                        if let Some((bid, ask)) = strategy::reward::evaluate_reward_quote(
+                            &cfg, market, &books, &risk_engine,
+                        ) {
+                            reward_intents.push((bid, market.condition_id.clone(), true));
+                            reward_intents.push((ask, market.condition_id.clone(), true));
+                        }
+                    }
+                    let results: Vec<_> = futures::future::join_all(
+                        reward_intents.iter().map(|(intent, _, _)| router.place(intent, &books))
+                    ).await;
+                    for (res, (intent, cond_id, needs_hedge)) in results.into_iter().zip(reward_intents.iter()) {
+                        match res {
                             Ok(result) => {
                                 metrics.inc_quotes_sent();
-                                process_fill(&result, &ask, &market.condition_id, &risk_engine, &mut hedge_tracker, &metrics, true);
+                                process_fill(&result, intent, cond_id, &risk_engine, &mut hedge_tracker, &metrics, *needs_hedge);
                                 risk_engine.reset_cancel_failures();
                             }
-                            Err(e) => error!(err = %e, "reward ask failed"),
+                            Err(e) => error!(err = %e, "reward place failed"),
                         }
                     }
                 }

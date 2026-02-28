@@ -64,7 +64,8 @@ pub fn generate_quotes(
 
     // Size: use min_order_size, rewards min_size, or base minimum — whichever is largest
     let rewards_min = market.rewards_min_size.unwrap_or(Decimal::ZERO);
-    let size = market.min_order_size.max(rewards_min).max(dec!(5));
+    let mm_min = Decimal::from_f64_retain(config.mm_min_size).unwrap_or(Decimal::ZERO);
+    let size = market.min_order_size.max(rewards_min).max(mm_min);
 
     // Enforce rewards max spread constraint
     if let Some(max_spread) = market.rewards_max_spread {

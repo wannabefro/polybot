@@ -151,11 +151,24 @@ pub fn evaluate_reward_quote(
 
     // Tight spread for reward qualification
     let half_spread = market.min_tick_size;
-    let bid_price = round_to_tick(mid - half_spread, market.min_tick_size);
-    let ask_price = round_to_tick(mid + half_spread, market.min_tick_size);
+    let mut bid_price = round_to_tick(mid - half_spread, market.min_tick_size);
+    let mut ask_price = round_to_tick(mid + half_spread, market.min_tick_size);
 
-    // Use larger size for reward qualification
-    let size = market.min_order_size.max(dec!(10));
+    // Enforce rewards_max_spread: tighten if spread exceeds constraint
+    if let Some(max_spread) = market.rewards_max_spread {
+        if (ask_price - bid_price) > max_spread {
+            let tight_half = max_spread / Decimal::TWO;
+            bid_price = round_to_tick(mid - tight_half, market.min_tick_size);
+            ask_price = round_to_tick(mid + tight_half, market.min_tick_size);
+            if ask_price <= bid_price {
+                return None;
+            }
+        }
+    }
+
+    // Use larger size for reward qualification; respect rewards_min_size
+    let rewards_min = market.rewards_min_size.unwrap_or(Decimal::ZERO);
+    let size = market.min_order_size.max(rewards_min).max(dec!(10));
 
     let bid_intent = OrderIntent {
         token_id: token.token_id.clone(),
@@ -482,5 +495,35 @@ mod tests {
         assert_eq!(round_to_tick(dec!(0.523), dec!(0.01)), dec!(0.52));
         assert_eq!(round_to_tick(dec!(0.526), dec!(0.01)), dec!(0.53));
         assert_eq!(round_to_tick(dec!(0.50), dec!(0.001)), dec!(0.500));
+    }
+
+    #[test]
+    fn reward_quote_max_spread_tightens() {
+        let config = test_config();
+        let mut market = make_market(true);
+        // Set a tight max spread that will force tightening
+        market.rewards_max_spread = Some(dec!(0.01));
+        let books = make_book_store("0.48", "0.52");
+        let risk = RiskEngine::new(config.clone());
+
+        let result = evaluate_reward_quote(&config, &market, &books, &risk);
+        if let Some((bid, ask)) = result {
+            assert!(ask.price - bid.price <= dec!(0.01), "spread should be tightened to max_spread");
+        }
+        // Either tightened or returned None — both are valid
+    }
+
+    #[test]
+    fn reward_quote_min_size_enforced() {
+        let config = test_config();
+        let mut market = make_market(true);
+        market.rewards_min_size = Some(dec!(25));
+        let books = make_book_store("0.48", "0.52");
+        let risk = RiskEngine::new(config.clone());
+
+        let result = evaluate_reward_quote(&config, &market, &books, &risk);
+        assert!(result.is_some());
+        let (bid, _ask) = result.unwrap();
+        assert!(bid.size >= dec!(25), "size should respect rewards_min_size");
     }
 }

@@ -34,6 +34,7 @@ anyhow = "1"
 dashmap = "6"
 futures = "0.3.32"
 parking_lot = "0.12.5"
+rand = "0.9"
 k256 = "0.13.4"
 rust_decimal_macros = "1.40.0"
 

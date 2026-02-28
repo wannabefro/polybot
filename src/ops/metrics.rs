@@ -19,6 +19,18 @@ pub struct Metrics {
     pub llm_timeouts: AtomicU64,
     pub daily_pnl: RwLock<Decimal>,
     pub rebate_accrual: RwLock<Decimal>,
+    /// Fills-per-quotes numerator (fills_count is the numerator; quotes_sent the denominator).
+    pub fill_rate_numerator: AtomicU64,
+    /// Last cancel latency in microseconds.
+    pub cancel_latency_us: AtomicU64,
+    /// Last heartbeat age in milliseconds.
+    pub heartbeat_age_ms: AtomicU64,
+    /// Rate-limiter throttle event count.
+    pub throttle_count: AtomicU64,
+    /// Cumulative slippage across all fills.
+    pub slippage_total: RwLock<Decimal>,
+    /// Average quote staleness in milliseconds.
+    pub quote_age_ms: AtomicU64,
 }
 
 impl Metrics {
@@ -34,6 +46,12 @@ impl Metrics {
             llm_timeouts: AtomicU64::new(0),
             daily_pnl: RwLock::new(Decimal::ZERO),
             rebate_accrual: RwLock::new(Decimal::ZERO),
+            fill_rate_numerator: AtomicU64::new(0),
+            cancel_latency_us: AtomicU64::new(0),
+            heartbeat_age_ms: AtomicU64::new(0),
+            throttle_count: AtomicU64::new(0),
+            slippage_total: RwLock::new(Decimal::ZERO),
+            quote_age_ms: AtomicU64::new(0),
         })
     }
 
@@ -77,6 +95,30 @@ impl Metrics {
         *self.rebate_accrual.write() += amount;
     }
 
+    pub fn inc_fill_rate_numerator(&self) {
+        self.fill_rate_numerator.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn update_cancel_latency_us(&self, us: u64) {
+        self.cancel_latency_us.store(us, Ordering::Relaxed);
+    }
+
+    pub fn update_heartbeat_age_ms(&self, ms: u64) {
+        self.heartbeat_age_ms.store(ms, Ordering::Relaxed);
+    }
+
+    pub fn inc_throttle_count(&self) {
+        self.throttle_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn add_slippage(&self, amount: Decimal) {
+        *self.slippage_total.write() += amount;
+    }
+
+    pub fn update_quote_age_ms(&self, ms: u64) {
+        self.quote_age_ms.store(ms, Ordering::Relaxed);
+    }
+
     /// Snapshot current metrics for structured logging.
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -90,6 +132,12 @@ impl Metrics {
             llm_timeouts: self.llm_timeouts.load(Ordering::Relaxed),
             daily_pnl: *self.daily_pnl.read(),
             rebate_accrual: *self.rebate_accrual.read(),
+            fill_rate_numerator: self.fill_rate_numerator.load(Ordering::Relaxed),
+            cancel_latency_us: self.cancel_latency_us.load(Ordering::Relaxed),
+            heartbeat_age_ms: self.heartbeat_age_ms.load(Ordering::Relaxed),
+            throttle_count: self.throttle_count.load(Ordering::Relaxed),
+            slippage_total: *self.slippage_total.read(),
+            quote_age_ms: self.quote_age_ms.load(Ordering::Relaxed),
         }
     }
 
@@ -104,6 +152,12 @@ impl Metrics {
             ws_reconnects = s.ws_reconnects,
             pnl = %s.daily_pnl,
             rebate = %s.rebate_accrual,
+            fill_rate_num = s.fill_rate_numerator,
+            cancel_latency_us = s.cancel_latency_us,
+            heartbeat_age_ms = s.heartbeat_age_ms,
+            throttle_count = s.throttle_count,
+            slippage = %s.slippage_total,
+            quote_age_ms = s.quote_age_ms,
             "metrics: summary"
         );
     }
@@ -115,8 +169,14 @@ impl Metrics {
         self.fills_count.store(0, Ordering::Relaxed);
         self.cancel_failures.store(0, Ordering::Relaxed);
         self.risk_rejections.store(0, Ordering::Relaxed);
+        self.fill_rate_numerator.store(0, Ordering::Relaxed);
+        self.cancel_latency_us.store(0, Ordering::Relaxed);
+        self.heartbeat_age_ms.store(0, Ordering::Relaxed);
+        self.throttle_count.store(0, Ordering::Relaxed);
+        self.quote_age_ms.store(0, Ordering::Relaxed);
         *self.daily_pnl.write() = Decimal::ZERO;
         *self.rebate_accrual.write() = Decimal::ZERO;
+        *self.slippage_total.write() = Decimal::ZERO;
     }
 }
 
@@ -133,6 +193,12 @@ pub struct MetricsSnapshot {
     pub llm_timeouts: u64,
     pub daily_pnl: Decimal,
     pub rebate_accrual: Decimal,
+    pub fill_rate_numerator: u64,
+    pub cancel_latency_us: u64,
+    pub heartbeat_age_ms: u64,
+    pub throttle_count: u64,
+    pub slippage_total: Decimal,
+    pub quote_age_ms: u64,
 }
 
 /// Spawn periodic metrics logging.
@@ -254,5 +320,73 @@ mod tests {
         let s = m.snapshot();
         assert_eq!(s.llm_calls, 2);
         assert_eq!(s.llm_timeouts, 1);
+    }
+
+    #[test]
+    fn fill_rate_numerator_tracking() {
+        let m = Metrics::new();
+        m.inc_fill_rate_numerator();
+        m.inc_fill_rate_numerator();
+        m.inc_fill_rate_numerator();
+        assert_eq!(m.snapshot().fill_rate_numerator, 3);
+    }
+
+    #[test]
+    fn cancel_latency_tracking() {
+        let m = Metrics::new();
+        m.update_cancel_latency_us(1500);
+        assert_eq!(m.snapshot().cancel_latency_us, 1500);
+        m.update_cancel_latency_us(800);
+        assert_eq!(m.snapshot().cancel_latency_us, 800);
+    }
+
+    #[test]
+    fn heartbeat_age_tracking() {
+        let m = Metrics::new();
+        m.update_heartbeat_age_ms(250);
+        assert_eq!(m.snapshot().heartbeat_age_ms, 250);
+    }
+
+    #[test]
+    fn throttle_count_tracking() {
+        let m = Metrics::new();
+        m.inc_throttle_count();
+        m.inc_throttle_count();
+        assert_eq!(m.snapshot().throttle_count, 2);
+    }
+
+    #[test]
+    fn slippage_total_tracking() {
+        let m = Metrics::new();
+        m.add_slippage(dec!(0.5));
+        m.add_slippage(dec!(1.25));
+        assert_eq!(m.snapshot().slippage_total, dec!(1.75));
+    }
+
+    #[test]
+    fn quote_age_tracking() {
+        let m = Metrics::new();
+        m.update_quote_age_ms(120);
+        assert_eq!(m.snapshot().quote_age_ms, 120);
+    }
+
+    #[test]
+    fn reset_daily_clears_new_metrics() {
+        let m = Metrics::new();
+        m.inc_fill_rate_numerator();
+        m.update_cancel_latency_us(500);
+        m.update_heartbeat_age_ms(100);
+        m.inc_throttle_count();
+        m.add_slippage(dec!(1.0));
+        m.update_quote_age_ms(200);
+
+        m.reset_daily();
+        let s = m.snapshot();
+        assert_eq!(s.fill_rate_numerator, 0);
+        assert_eq!(s.cancel_latency_us, 0);
+        assert_eq!(s.heartbeat_age_ms, 0);
+        assert_eq!(s.throttle_count, 0);
+        assert_eq!(s.slippage_total, Decimal::ZERO);
+        assert_eq!(s.quote_age_ms, 0);
     }
 }

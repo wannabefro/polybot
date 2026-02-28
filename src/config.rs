@@ -36,6 +36,14 @@ pub struct Config {
 
     // ── Hedge SLA ──
     pub hedge_timeout: Duration,
+
+    // ── Operational tuning ──
+    pub rate_limit_per_sec: f64,
+    pub llm_poll_interval: Duration,
+    pub metrics_interval: Duration,
+    pub mm_min_size: f64,
+    pub neg_risk_stale_secs: u64,
+    pub quote_tick_secs: u64,
 }
 
 impl Config {
@@ -72,6 +80,16 @@ impl Config {
             hedge_timeout: Duration::from_millis(
                 env_or("POLYBOT_HEDGE_TIMEOUT_MS", "500").parse()?,
             ),
+            rate_limit_per_sec: env_or("POLYBOT_RATE_LIMIT_PS", "70.0").parse()?,
+            llm_poll_interval: Duration::from_secs(
+                env_or("POLYBOT_LLM_POLL_SECS", "10").parse()?,
+            ),
+            metrics_interval: Duration::from_secs(
+                env_or("POLYBOT_METRICS_SECS", "30").parse()?,
+            ),
+            mm_min_size: env_or("POLYBOT_MM_MIN_SIZE", "5.0").parse()?,
+            neg_risk_stale_secs: env_or("POLYBOT_NR_STALE_SECS", "10").parse()?,
+            quote_tick_secs: env_or("POLYBOT_QUOTE_TICK_SECS", "5").parse()?,
         })
     }
 
@@ -108,6 +126,12 @@ pub fn test_config() -> Config {
         mean_revert_max_nav_frac: 0.005,
         mean_revert_min_volume_24h: 10_000.0,
         hedge_timeout: Duration::from_millis(500),
+        rate_limit_per_sec: 70.0,
+        llm_poll_interval: Duration::from_secs(10),
+        metrics_interval: Duration::from_secs(30),
+        mm_min_size: 5.0,
+        neg_risk_stale_secs: 10,
+        quote_tick_secs: 5,
     }
 }
 

@@ -5,6 +5,7 @@
 //
 // This module provides monitoring on top of the SDK's built-in heartbeat.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,10 @@ use crate::ops::metrics::Metrics;
 pub struct HeartbeatMonitor {
     last_success: RwLock<Instant>,
     interval: Duration,
+    /// Rolling heartbeat ID (set by the server on each heartbeat response).
+    heartbeat_id: RwLock<Option<String>>,
+    /// Consecutive heartbeat failure counter.
+    consecutive_failures: AtomicU32,
 }
 
 impl HeartbeatMonitor {
@@ -25,6 +30,8 @@ impl HeartbeatMonitor {
         Arc::new(Self {
             last_success: RwLock::new(Instant::now()),
             interval,
+            heartbeat_id: RwLock::new(None),
+            consecutive_failures: AtomicU32::new(0),
         })
     }
 
@@ -41,6 +48,31 @@ impl HeartbeatMonitor {
     /// True if we haven't had a heartbeat in 3× the interval.
     pub fn is_stale(&self) -> bool {
         self.since_last() > self.interval * 3
+    }
+
+    /// Set the rolling heartbeat ID (returned by server).
+    pub fn set_id(&self, id: String) {
+        *self.heartbeat_id.write() = Some(id);
+    }
+
+    /// Get the current heartbeat ID.
+    pub fn id(&self) -> Option<String> {
+        self.heartbeat_id.read().clone()
+    }
+
+    /// Record a heartbeat failure (increments consecutive failure count).
+    pub fn record_failure(&self) {
+        self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get consecutive failure count.
+    pub fn failure_count(&self) -> u32 {
+        self.consecutive_failures.load(Ordering::Relaxed)
+    }
+
+    /// Reset failure count (on successful heartbeat).
+    pub fn reset_failures(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
     }
 }
 
@@ -79,5 +111,39 @@ mod tests {
         let mon = HeartbeatMonitor::new(Duration::from_secs(5));
         *mon.last_success.write() = Instant::now() - Duration::from_secs(10);
         assert!(!mon.is_stale()); // 10s < 15s (3×5)
+    }
+
+    #[test]
+    fn set_and_get_heartbeat_id() {
+        let mon = HeartbeatMonitor::new(Duration::from_secs(5));
+        assert!(mon.id().is_none());
+        mon.set_id("hb-12345".into());
+        assert_eq!(mon.id(), Some("hb-12345".into()));
+    }
+
+    #[test]
+    fn heartbeat_id_updates() {
+        let mon = HeartbeatMonitor::new(Duration::from_secs(5));
+        mon.set_id("hb-1".into());
+        mon.set_id("hb-2".into());
+        assert_eq!(mon.id(), Some("hb-2".into()));
+    }
+
+    #[test]
+    fn record_failure_increments() {
+        let mon = HeartbeatMonitor::new(Duration::from_secs(5));
+        assert_eq!(mon.failure_count(), 0);
+        mon.record_failure();
+        mon.record_failure();
+        assert_eq!(mon.failure_count(), 2);
+    }
+
+    #[test]
+    fn reset_failures_clears_count() {
+        let mon = HeartbeatMonitor::new(Duration::from_secs(5));
+        mon.record_failure();
+        mon.record_failure();
+        mon.reset_failures();
+        assert_eq!(mon.failure_count(), 0);
     }
 }

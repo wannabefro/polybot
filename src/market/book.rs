@@ -163,6 +163,11 @@ impl BookStore {
     pub fn any_stale(&self, threshold: std::time::Duration) -> bool {
         self.inner.read().values().any(|b| b.is_stale(threshold))
     }
+
+    /// Return the stored hash from the last book update for a given token.
+    pub fn hash(&self, token_id: &str) -> Option<String> {
+        self.inner.read().get(token_id).and_then(|b| b.hash.clone())
+    }
 }
 
 #[cfg(test)]
@@ -401,5 +406,19 @@ mod tests {
         store.apply("t1", &u);
         // Just applied — not stale
         assert!(!store.any_stale(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn hash_returns_stored_value() {
+        let store = BookStore::new();
+        let u = make_update(vec![("0.48", "100")], vec![("0.52", "100")]);
+        store.apply("t1", &u);
+        assert_eq!(store.hash("t1"), Some("abc123".into()));
+    }
+
+    #[test]
+    fn hash_returns_none_for_missing() {
+        let store = BookStore::new();
+        assert!(store.hash("nonexistent").is_none());
     }
 }

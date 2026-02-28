@@ -4,6 +4,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use polymarket_client_sdk::clob::ws::{Client as WsClient, types::response::BookUpdate};
 use polymarket_client_sdk::types::U256;
+use rand::Rng;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
@@ -76,6 +77,12 @@ pub fn spawn(
                                         }
                                         None => {
                                             warn!("ws: stream ended");
+                                            // Reconnect stagger: sleep 1-3s jitter before resubscribing
+                                            // to avoid thundering herd on reconnect.
+                                            let jitter_ms = rand::rng().random_range(1000..=3000);
+                                            tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
+                                            // TODO: compare book hashes against REST snapshot
+                                            // before resuming quoting (hash-check-vs-REST resync).
                                             break;
                                         }
                                     }
