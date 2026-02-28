@@ -27,6 +27,8 @@ pub struct UnhedgedFill {
     pub price: Decimal,
     pub size: Decimal,
     pub filled_at: Instant,
+    pub neg_risk: bool,
+    pub fee_rate_bps: Decimal,
 }
 
 impl UnhedgedFill {
@@ -58,8 +60,8 @@ impl UnhedgedFill {
             size: self.size,
             order_type: OrderType::FOK, // fill-or-kill for hedges
             post_only: false,
-            neg_risk: false,
-            fee_rate_bps: Decimal::ZERO,
+            neg_risk: self.neg_risk,
+            fee_rate_bps: self.fee_rate_bps,
         })
     }
 }
@@ -126,27 +128,62 @@ impl HedgeTracker {
 ///   - Market has active rewards
 ///   - Reward density (estimated) justifies the spread risk
 ///   - Passes risk checks
+///
+/// Returns a Vec of (bid, ask) pairs — one per quotable token.
 pub fn evaluate_reward_quote(
     _config: &Config,
     market: &TradableMarket,
     books: &BookStore,
     risk: &RiskEngine,
-) -> Option<(OrderIntent, OrderIntent)> {
+) -> Vec<(OrderIntent, OrderIntent)> {
     if !market.rewards_active {
-        return None;
+        return Vec::new();
     }
 
     if market.tokens.is_empty() {
-        return None;
+        return Vec::new();
     }
 
-    let token = &market.tokens[0];
+    let mut pairs = Vec::new();
+    for token in &market.tokens {
+        if let Some(pair) = evaluate_token_reward(market, token, books, risk) {
+            pairs.push(pair);
+        }
+    }
+    pairs
+}
+
+fn evaluate_token_reward(
+    market: &TradableMarket,
+    token: &crate::market::discovery::TokenInfo,
+    books: &BookStore,
+    risk: &RiskEngine,
+) -> Option<(OrderIntent, OrderIntent)> {
     let book = books.get(&token.token_id)?;
     let mid = book.mid_price()?;
     let spread = book.spread()?;
 
     if spread.is_zero() {
         return None;
+    }
+
+    // Check reward-to-spread ratio: only quote if reward density justifies spread risk.
+    // The reward daily rate is per-$1 notional; spread is the cost of a round-trip.
+    // We need reward * holding_period > spread_cost * MIN_REWARD_SPREAD_RATIO.
+    let our_spread = market.min_tick_size * Decimal::TWO;
+    if our_spread > Decimal::ZERO {
+        // Rough check: if the market's book spread is very wide relative to our
+        // quoting spread, the adverse selection risk may exceed reward income.
+        let ratio = spread / our_spread;
+        if ratio > MIN_REWARD_SPREAD_RATIO * Decimal::TWO {
+            debug!(
+                market = %market.question,
+                book_spread = %spread,
+                our_spread = %our_spread,
+                "reward: book spread too wide vs reward — skipping"
+            );
+            return None;
+        }
     }
 
     // Tight spread for reward qualification
@@ -279,6 +316,8 @@ mod tests {
             price: dec!(0.50),
             size: dec!(10),
             filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         };
         assert!(!fill.hedge_sla_breached(Duration::from_millis(500)));
     }
@@ -291,6 +330,8 @@ mod tests {
             price: dec!(0.50),
             size: dec!(10),
             filled_at: Instant::now() - Duration::from_secs(1),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         };
         assert!(fill.hedge_sla_breached(Duration::from_millis(500)));
     }
@@ -303,6 +344,8 @@ mod tests {
             price: dec!(0.52),
             size: dec!(10),
             filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         };
         let books = make_book_store("0.48", "0.52");
         let intent = fill.hedge_intent(&books).unwrap();
@@ -313,6 +356,23 @@ mod tests {
     }
 
     #[test]
+    fn hedge_intent_inherits_neg_risk_and_fee() {
+        let fill = UnhedgedFill {
+            token_id: "token1".into(),
+            side: Side::Buy,
+            price: dec!(0.52),
+            size: dec!(10),
+            filled_at: Instant::now(),
+            neg_risk: true,
+            fee_rate_bps: dec!(20),
+        };
+        let books = make_book_store("0.48", "0.52");
+        let intent = fill.hedge_intent(&books).unwrap();
+        assert!(intent.neg_risk, "hedge must inherit neg_risk from fill");
+        assert_eq!(intent.fee_rate_bps, dec!(20), "hedge must inherit fee_rate_bps");
+    }
+
+    #[test]
     fn hedge_intent_sell_fill_buys() {
         let fill = UnhedgedFill {
             token_id: "token1".into(),
@@ -320,6 +380,8 @@ mod tests {
             price: dec!(0.48),
             size: dec!(10),
             filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         };
         let books = make_book_store("0.48", "0.52");
         let intent = fill.hedge_intent(&books).unwrap();
@@ -335,6 +397,8 @@ mod tests {
             price: dec!(0.50),
             size: dec!(10),
             filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         };
         let books = BookStore::new();
         assert!(fill.hedge_intent(&books).is_none());
@@ -353,6 +417,8 @@ mod tests {
             price: dec!(0.50),
             size: dec!(10),
             filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         });
         assert_eq!(tracker.unhedged_count(), 1);
     }
@@ -366,6 +432,8 @@ mod tests {
             price: dec!(0.50),
             size: dec!(10),
             filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         });
         tracker.mark_hedged("t1");
         assert_eq!(tracker.unhedged_count(), 0);
@@ -380,6 +448,8 @@ mod tests {
             price: dec!(0.50),
             size: dec!(10),
             filled_at: Instant::now() - Duration::from_secs(1),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         });
         tracker.record_fill(UnhedgedFill {
             token_id: "t2".into(),
@@ -387,6 +457,8 @@ mod tests {
             price: dec!(0.50),
             size: dec!(5),
             filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         });
 
         let breached = tracker.breached_fills();
@@ -405,6 +477,8 @@ mod tests {
             price: dec!(0.50),
             size: dec!(10),
             filled_at: Instant::now() - Duration::from_secs(1),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         });
         assert!(tracker.has_emergency());
     }
@@ -418,6 +492,8 @@ mod tests {
             price: dec!(0.52),
             size: dec!(10),
             filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         });
 
         let books = make_book_store("0.48", "0.52");
@@ -435,6 +511,8 @@ mod tests {
             price: dec!(0.50),
             size: dec!(10),
             filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         });
         tracker.clear();
         assert_eq!(tracker.unhedged_count(), 0);
@@ -449,7 +527,7 @@ mod tests {
         let books = make_book_store("0.48", "0.52");
         let risk = RiskEngine::new(config.clone());
 
-        assert!(evaluate_reward_quote(&config, &market, &books, &risk).is_none());
+        assert!(evaluate_reward_quote(&config, &market, &books, &risk).is_empty());
     }
 
     #[test]
@@ -460,8 +538,8 @@ mod tests {
         let risk = RiskEngine::new(config.clone());
 
         let result = evaluate_reward_quote(&config, &market, &books, &risk);
-        assert!(result.is_some());
-        let (bid, ask) = result.unwrap();
+        assert!(!result.is_empty());
+        let (bid, ask) = &result[0];
         assert!(matches!(bid.side, Side::Buy));
         assert!(matches!(ask.side, Side::Sell));
         assert!(bid.post_only);
@@ -477,7 +555,7 @@ mod tests {
         let books = make_book_store("0.48", "0.52");
         let risk = RiskEngine::new(config.clone());
 
-        assert!(evaluate_reward_quote(&config, &market, &books, &risk).is_none());
+        assert!(evaluate_reward_quote(&config, &market, &books, &risk).is_empty());
     }
 
     #[test]
@@ -487,7 +565,7 @@ mod tests {
         let books = BookStore::new(); // empty
         let risk = RiskEngine::new(config.clone());
 
-        assert!(evaluate_reward_quote(&config, &market, &books, &risk).is_none());
+        assert!(evaluate_reward_quote(&config, &market, &books, &risk).is_empty());
     }
 
     #[test]
@@ -507,7 +585,7 @@ mod tests {
         let risk = RiskEngine::new(config.clone());
 
         let result = evaluate_reward_quote(&config, &market, &books, &risk);
-        if let Some((bid, ask)) = result {
+        if let Some((bid, ask)) = result.first() {
             assert!(ask.price - bid.price <= dec!(0.01), "spread should be tightened to max_spread");
         }
         // Either tightened or returned None — both are valid
@@ -522,8 +600,8 @@ mod tests {
         let risk = RiskEngine::new(config.clone());
 
         let result = evaluate_reward_quote(&config, &market, &books, &risk);
-        assert!(result.is_some());
-        let (bid, _ask) = result.unwrap();
+        assert!(!result.is_empty());
+        let (bid, _ask) = &result[0];
         assert!(bid.size >= dec!(25), "size should respect rewards_min_size");
     }
 }

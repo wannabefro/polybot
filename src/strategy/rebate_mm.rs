@@ -20,20 +20,38 @@ pub struct QuoteParams {
     pub skew_factor: Decimal,
 }
 
-/// Generate two-sided quotes for a tradable market.
+/// Generate two-sided quotes for each outcome in a tradable market.
 ///
-/// Returns (bid_intent, ask_intent) or None if the market isn't quotable.
+/// Returns a Vec of (bid_intent, ask_intent) pairs — one per quotable token.
 pub fn generate_quotes(
     config: &Config,
     market: &TradableMarket,
     books: &BookStore,
     risk: &RiskEngine,
-) -> Option<(OrderIntent, OrderIntent)> {
+) -> Vec<(OrderIntent, OrderIntent)> {
     if market.tokens.len() < 2 {
-        return None;
+        return Vec::new();
     }
 
-    let token = &market.tokens[0];
+    let mut pairs = Vec::new();
+
+    for token in &market.tokens {
+        if let Some(pair) = generate_token_quotes(config, market, token, books, risk) {
+            pairs.push(pair);
+        }
+    }
+
+    pairs
+}
+
+/// Generate bid/ask quotes for a single token within a market.
+fn generate_token_quotes(
+    config: &Config,
+    market: &TradableMarket,
+    token: &crate::market::discovery::TokenInfo,
+    books: &BookStore,
+    risk: &RiskEngine,
+) -> Option<(OrderIntent, OrderIntent)> {
     let book = books.get(&token.token_id)?;
     let mid = book.mid_price()?;
     let spread = book.spread()?;
@@ -54,7 +72,9 @@ pub fn generate_quotes(
     let inventory = risk.token_inventory(&token.token_id);
     let skew = if !inventory.is_zero() {
         let skew_factor = dec!(0.001); // 10 bps per unit of inventory
-        -(inventory * skew_factor).min(half_spread / dec!(2)).max(-(half_spread / dec!(2)))
+        let raw = -(inventory * skew_factor);
+        let bound = half_spread / dec!(2);
+        raw.clamp(-bound, bound)
     } else {
         Decimal::ZERO
     };

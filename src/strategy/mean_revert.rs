@@ -249,12 +249,19 @@ pub fn evaluate_entry(
         return None;
     }
 
+    // Determine entry price: cross the spread to get filled immediately
+    let entry_price = match side {
+        Side::Buy => book.asks.best().map(|l| l.price).unwrap_or(mid),
+        Side::Sell => book.bids.best().map(|l| l.price).unwrap_or(mid),
+        _ => mid,
+    };
+
     let intent = OrderIntent {
         token_id: token_id.clone(),
         side,
-        price: mid, // enter at mid
+        price: entry_price,
         size,
-        order_type: OrderType::GTC,
+        order_type: OrderType::FOK, // fill-or-kill: get in or don't
         post_only: false,
         neg_risk: market.neg_risk,
         fee_rate_bps: market.maker_fee_bps,

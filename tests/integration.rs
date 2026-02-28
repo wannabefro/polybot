@@ -86,18 +86,18 @@ async fn paper_pipeline_rebate_mm_tick() {
 
     // Generate quotes
     let quotes = strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk);
-    assert!(quotes.is_some(), "should generate quotes for a valid market");
+    assert!(!quotes.is_empty(), "should generate quotes for a valid market");
 
-    let (bid, ask) = quotes.unwrap();
+    let (bid, ask) = &quotes[0];
     assert!(matches!(bid.side, Side::Buy));
     assert!(matches!(ask.side, Side::Sell));
     assert!(bid.post_only);
     assert!(ask.post_only);
 
     // Route through paper engine
-    let bid_result = router.place(&bid, &books).await.unwrap();
+    let bid_result = router.place(bid, &books).await.unwrap();
     metrics.inc_quotes_sent();
-    let ask_result = router.place(&ask, &books).await.unwrap();
+    let ask_result = router.place(ask, &books).await.unwrap();
     metrics.inc_quotes_sent();
 
     assert!(bid_result.order_id.starts_with("paper-"));
@@ -120,11 +120,11 @@ async fn paper_pipeline_reward_tick() {
     seed_book(&books, "token_yes", "0.48", "0.52");
 
     let quotes = strategy::reward::evaluate_reward_quote(&cfg, &market, &books, &risk);
-    assert!(quotes.is_some(), "reward market should produce quotes");
+    assert!(!quotes.is_empty(), "reward market should produce quotes");
 
-    let (bid, ask) = quotes.unwrap();
-    router.place(&bid, &books).await.unwrap();
-    router.place(&ask, &books).await.unwrap();
+    let (bid, ask) = &quotes[0];
+    router.place(bid, &books).await.unwrap();
+    router.place(ask, &books).await.unwrap();
 
     assert_eq!(router.paper_engine().unwrap().open_order_count(), 2);
 }
@@ -218,6 +218,8 @@ async fn hedge_sla_breach_triggers_emergency() {
         price: dec!(0.52),
         size: dec!(10),
         filled_at: Instant::now() - Duration::from_secs(1),
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
     });
 
     assert!(tracker.has_emergency(), "should be in emergency state");
@@ -241,6 +243,8 @@ async fn hedge_tracker_generates_opposing_orders() {
         price: dec!(0.52),
         size: dec!(10),
         filled_at: Instant::now(),
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
     });
 
     let hedges = tracker.pending_hedges(&books);
@@ -304,7 +308,7 @@ async fn multi_strategy_coexistence() {
     seed_book(&books, "token_yes", "0.48", "0.52");
 
     // Rebate MM generates quotes
-    if let Some((bid, ask)) = strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk) {
+    for (bid, ask) in strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk) {
         router.place(&bid, &books).await.unwrap();
         router.place(&ask, &books).await.unwrap();
         metrics.inc_quotes_sent();
@@ -312,7 +316,7 @@ async fn multi_strategy_coexistence() {
     }
 
     // Reward also generates quotes (same market, different quotes)
-    if let Some((bid, ask)) =
+    for (bid, ask) in
         strategy::reward::evaluate_reward_quote(&cfg, &market, &books, &risk)
     {
         router.place(&bid, &books).await.unwrap();
@@ -341,7 +345,7 @@ async fn cancel_all_clears_paper_engine() {
     let market = make_market(true, 50_000.0);
     seed_book(&books, "token_yes", "0.48", "0.52");
 
-    if let Some((bid, ask)) = strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk) {
+    for (bid, ask) in strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk) {
         router.place(&bid, &books).await.unwrap();
         router.place(&ask, &books).await.unwrap();
     }
@@ -606,15 +610,15 @@ async fn inventory_skew_shifts_quotes() {
 
     // Without inventory, get baseline quotes
     let quotes_neutral = strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk);
-    assert!(quotes_neutral.is_some());
-    let (bid_n, _ask_n) = quotes_neutral.unwrap();
+    assert!(!quotes_neutral.is_empty());
+    let (bid_n, _ask_n) = &quotes_neutral[0];
 
     // Record moderate long position (50 shares at 0.50 = 25 notional, well within 100 limit)
     risk.record_fill("cond1", "token_yes", Side::Buy, Decimal::from(50), Decimal::from(25));
 
     let quotes_long = strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk);
-    assert!(quotes_long.is_some());
-    let (bid_l, _ask_l) = quotes_long.unwrap();
+    assert!(!quotes_long.is_empty());
+    let (bid_l, _ask_l) = &quotes_long[0];
 
     // When long, bid should be lower or equal (less eager to buy more)
     assert!(bid_l.price <= bid_n.price, "long inventory should lower bid price: got {} vs baseline {}", bid_l.price, bid_n.price);

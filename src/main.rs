@@ -53,6 +53,8 @@ fn process_fill(
                 price: fill.price,
                 size: fill.size,
                 filled_at: std::time::Instant::now(),
+                neg_risk: intent.neg_risk,
+                fee_rate_bps: intent.fee_rate_bps,
             });
         }
     }
@@ -252,13 +254,17 @@ async fn main() -> Result<()> {
                 {
                     let mut rebate_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool)> = Vec::new();
                     for market in universe.iter() {
+                        // Skip rewards-active markets — reward capture handles them
+                        if market.rewards_active {
+                            continue;
+                        }
                         if rate_limiter.try_acquire().is_err() {
                             break;
                         }
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;
                         }
-                        if let Some((bid, ask)) = strategy::rebate_mm::generate_quotes(
+                        for (bid, ask) in strategy::rebate_mm::generate_quotes(
                             &cfg, market, &books, &risk_engine,
                         ) {
                             rebate_intents.push((bid, market.condition_id.clone(), false));
@@ -290,7 +296,7 @@ async fn main() -> Result<()> {
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;
                         }
-                        if let Some((bid, ask)) = strategy::reward::evaluate_reward_quote(
+                        for (bid, ask) in strategy::reward::evaluate_reward_quote(
                             &cfg, market, &books, &risk_engine,
                         ) {
                             reward_intents.push((bid, market.condition_id.clone(), true));
@@ -343,16 +349,19 @@ async fn main() -> Result<()> {
                     ) {
                         match router.place(&intent, &books).await {
                             Ok(result) => {
-                                mean_revert.open_position(
-                                    strategy::mean_revert::MeanRevertPosition {
-                                        token_id: intent.token_id.clone(),
-                                        side: intent.side,
-                                        entry_price: intent.price,
-                                        size: intent.size,
-                                        opened_at: std::time::Instant::now(),
-                                    },
-                                );
-                                metrics.inc_fills();
+                                // Only track position on confirmed fill, not just submission
+                                if result.paper_fill.is_some() {
+                                    mean_revert.open_position(
+                                        strategy::mean_revert::MeanRevertPosition {
+                                            token_id: intent.token_id.clone(),
+                                            side: intent.side,
+                                            entry_price: intent.price,
+                                            size: intent.size,
+                                            opened_at: std::time::Instant::now(),
+                                        },
+                                    );
+                                    metrics.inc_fills();
+                                }
                             }
                             Err(e) => error!(err = %e, "mean-revert entry failed"),
                         }
