@@ -86,8 +86,8 @@ impl Config {
             ),
             mean_revert_max_nav_frac: env_or("POLYBOT_MR_MAX_NAV_PCT", "0.005").parse()?,
             mean_revert_min_volume_24h: env_or("POLYBOT_MR_MIN_VOL_24H", "10000.0").parse()?,
-            hedge_timeout: Duration::from_millis(
-                env_or("POLYBOT_HEDGE_TIMEOUT_MS", "500").parse()?,
+            hedge_timeout: Duration::from_secs(
+                env_or("POLYBOT_HEDGE_TIMEOUT_SECS", "300").parse()?,
             ),
             rate_limit_per_sec: env_or("POLYBOT_RATE_LIMIT_PS", "70.0").parse()?,
             llm_poll_interval: Duration::from_secs(
@@ -192,7 +192,7 @@ pub fn test_config() -> Config {
         stale_feed_threshold: Duration::from_millis(1500),
         mean_revert_max_nav_frac: 0.005,
         mean_revert_min_volume_24h: 10_000.0,
-        hedge_timeout: Duration::from_millis(500),
+        hedge_timeout: Duration::from_secs(300),
         rate_limit_per_sec: 70.0,
         llm_poll_interval: Duration::from_secs(10),
         metrics_interval: Duration::from_secs(30),

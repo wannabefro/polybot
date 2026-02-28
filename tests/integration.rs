@@ -207,14 +207,48 @@ async fn risk_daily_reset_clears_loss() {
     assert!(matches!(risk.check("cond1", &intent), RiskVerdict::Approved));
 }
 
-/// Hedge SLA breach triggers emergency state.
+/// Complement fills on the same condition auto-hedge each other.
 #[tokio::test]
-async fn hedge_sla_breach_triggers_emergency() {
-    let mut tracker = strategy::reward::HedgeTracker::new(Duration::from_millis(500));
+async fn complement_fills_auto_hedge() {
+    let mut tracker = strategy::reward::HedgeTracker::new(Duration::from_secs(300));
 
-    // Fill that's already expired (1 second old, SLA is 500ms)
+    // First fill: BUY YES
     tracker.record_fill(strategy::reward::UnhedgedFill {
         token_id: "token_yes".into(),
+        condition_id: "cond1".into(),
+        side: Side::Buy,
+        price: dec!(0.48),
+        size: dec!(10),
+        filled_at: Instant::now(),
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
+    });
+    assert_eq!(tracker.unhedged_count(), 1);
+
+    // Second fill: BUY NO on same condition → auto-hedged
+    tracker.record_fill(strategy::reward::UnhedgedFill {
+        token_id: "token_no".into(),
+        condition_id: "cond1".into(),
+        side: Side::Buy,
+        price: dec!(0.52),
+        size: dec!(10),
+        filled_at: Instant::now(),
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
+    });
+    assert_eq!(tracker.unhedged_count(), 0, "complement fills should auto-hedge");
+}
+
+/// Expired single-sided fills generate SELL unwind orders.
+#[tokio::test]
+async fn expired_fill_generates_unwind() {
+    let books = BookStore::new();
+    seed_book(&books, "token_yes", "0.48", "0.52");
+
+    let mut tracker = strategy::reward::HedgeTracker::new(Duration::from_millis(100));
+    tracker.record_fill(strategy::reward::UnhedgedFill {
+        token_id: "token_yes".into(),
+        condition_id: "cond1".into(),
         side: Side::Buy,
         price: dec!(0.52),
         size: dec!(10),
@@ -223,36 +257,11 @@ async fn hedge_sla_breach_triggers_emergency() {
         fee_rate_bps: Decimal::ZERO,
     });
 
-    assert!(tracker.has_emergency(), "should be in emergency state");
-    assert_eq!(tracker.breached_fills().len(), 1);
-
-    // Emergency response: cancel-all would be called, then clear tracker
-    tracker.clear();
-    assert!(!tracker.has_emergency());
-}
-
-/// Hedge tracker generates correct hedge orders.
-#[tokio::test]
-async fn hedge_tracker_generates_opposing_orders() {
-    let books = BookStore::new();
-    seed_book(&books, "token_yes", "0.48", "0.52");
-
-    let mut tracker = strategy::reward::HedgeTracker::new(Duration::from_millis(500));
-    tracker.record_fill(strategy::reward::UnhedgedFill {
-        token_id: "token_yes".into(),
-        side: Side::Buy,
-        price: dec!(0.52),
-        size: dec!(10),
-        filled_at: Instant::now(),
-        neg_risk: false,
-        fee_rate_bps: Decimal::ZERO,
-    });
-
-    let hedges = tracker.pending_hedges(&books);
-    assert_eq!(hedges.len(), 1);
-    assert!(matches!(hedges[0].side, Side::Sell), "hedge for buy should sell");
-    assert_eq!(hedges[0].price, dec!(0.48), "should sell at best bid");
-    assert!(!hedges[0].post_only, "hedges should not be post-only");
+    let unwinds = tracker.expired_unwinds(&books);
+    assert_eq!(unwinds.len(), 1);
+    assert!(matches!(unwinds[0].side, Side::Sell), "unwind should sell tokens");
+    assert_eq!(unwinds[0].price, dec!(0.48), "should sell at best bid");
+    assert!(!unwinds[0].post_only, "unwinds should not be post-only");
 }
 
 /// Mean reversion: full cycle from price recording to exit.

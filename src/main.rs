@@ -90,6 +90,7 @@ fn process_fill(
         if needs_hedge {
             hedge_tracker.record_fill(UnhedgedFill {
                 token_id: fill.token_id.clone(),
+                condition_id: condition_id.to_string(),
                 side,
                 price: fill.price,
                 size: fill.size,
@@ -115,6 +116,7 @@ fn process_fill(
             let price = if !size.is_zero() { notional / size } else { intent.price };
             hedge_tracker.record_fill(UnhedgedFill {
                 token_id: intent.token_id.clone(),
+                condition_id: condition_id.to_string(),
                 side: intent.side,
                 price,
                 size,
@@ -361,31 +363,25 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // Handle hedge emergencies first
-                if hedge_tracker.has_emergency() {
-                    error!("hedge SLA breached — cancel-all + flatten");
-                    if let Err(e) = router.cancel_all().await {
-                        error!(err = %e, "hedge emergency cancel-all failed");
-                        risk_engine.record_cancel_failure();
-                    } else {
-                        active_quotes.clear();
-                    }
-                    risk_engine.halt("hedge SLA breach");
-                    hedge_tracker.clear();
-                    continue;
-                }
-
-                // Pending hedges
-                for hedge in hedge_tracker.pending_hedges(&books) {
-                    match router.place(&hedge, &books).await {
+                // Unwind expired single-sided fills (complement didn't fill in time)
+                for unwind in hedge_tracker.expired_unwinds(&books) {
+                    info!(
+                        "⚠️ UNWIND {} {} @ ${} — complement didn't fill",
+                        unwind.token_id, unwind.size, unwind.price,
+                    );
+                    match router.place(&unwind, &books).await {
                         Ok(result) => {
                             if result.paper_fill.is_some() || result.live_matched {
-                                hedge_tracker.mark_hedged(&hedge.token_id);
+                                hedge_tracker.mark_hedged(&unwind.token_id);
+                                info!("✅ UNWOUND {}", unwind.token_id);
+                            } else {
+                                // FOK didn't fill — will retry next tick
+                                debug!(token = %unwind.token_id, "unwind FOK not filled, will retry");
                             }
                             risk_engine.reset_cancel_failures();
                         }
                         Err(e) => {
-                            error!(err = %e, "hedge order failed");
+                            error!(err = %e, "unwind order failed");
                         }
                     }
                 }

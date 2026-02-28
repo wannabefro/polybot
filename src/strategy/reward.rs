@@ -1,14 +1,15 @@
 //! Sponsored/reward capture strategy.
 //!
 //! Targets markets where reward density is high and depth is low.
-//! One-sided fills are immediately neutralized with a FAK hedge.
-//! Hedge latency SLA: 500ms timeout → cancel-all + flatten.
+//! One-sided fills are tracked; if the complement side also fills within
+//! the hedge window, the pair is considered hedged. If the complement
+//! doesn't fill in time, we SELL the tokens at best bid to flatten.
 
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::time::{Duration, Instant};
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::config::Config;
 use crate::market::book::BookStore;
@@ -16,12 +17,13 @@ use crate::market::discovery::TradableMarket;
 use crate::order::pipeline::OrderIntent;
 use crate::risk::guardrails::{RiskEngine, RiskVerdict};
 
-/// A fill that needs hedging.
+/// A fill that needs hedging (complement side hasn't filled yet).
 #[derive(Debug, Clone)]
 pub struct UnhedgedFill {
     pub token_id: String,
-    pub side: Side,
+    pub condition_id: String,
     #[allow(dead_code)]
+    pub side: Side,
     pub price: Decimal,
     pub size: Decimal,
     pub filled_at: Instant,
@@ -30,33 +32,23 @@ pub struct UnhedgedFill {
 }
 
 impl UnhedgedFill {
-    /// Check if this fill has breached the hedge SLA.
-    pub fn hedge_sla_breached(&self, timeout: Duration) -> bool {
+    /// Check if this fill has exceeded the hedge window.
+    pub fn hedge_expired(&self, timeout: Duration) -> bool {
         self.filled_at.elapsed() > timeout
     }
 
-    /// Build a hedge order (opposite side, FAK, aggressive price).
-    pub fn hedge_intent(&self, books: &BookStore) -> Option<OrderIntent> {
+    /// Build a SELL order to flatten this position (unwind at best bid).
+    pub fn unwind_intent(&self, books: &BookStore) -> Option<OrderIntent> {
+        // We always hold tokens from a BUY fill → SELL at best bid to flatten
         let book = books.get(&self.token_id)?;
-
-        let (hedge_side, hedge_price) = match self.side {
-            Side::Buy => {
-                let bid = book.bids.best()?;
-                (Side::Sell, bid.price)
-            }
-            Side::Sell => {
-                let ask = book.asks.best()?;
-                (Side::Buy, ask.price)
-            }
-            _ => return None,
-        };
+        let bid = book.bids.best()?;
 
         Some(OrderIntent {
             token_id: self.token_id.clone(),
-            side: hedge_side,
-            price: hedge_price,
+            side: Side::Sell,
+            price: bid.price,
             size: self.size,
-            order_type: OrderType::FOK, // fill-or-kill for hedges
+            order_type: OrderType::FOK,
             post_only: false,
             neg_risk: self.neg_risk,
             fee_rate_bps: self.fee_rate_bps,
@@ -64,7 +56,11 @@ impl UnhedgedFill {
     }
 }
 
-/// Tracker for pending hedges.
+/// Tracker for market-making fills awaiting complement hedges.
+///
+/// When both sides of a binary pair fill (BUY YES + BUY NO on the same
+/// condition), they cancel out at settlement → profit = spread.
+/// If only one side fills, we wait for the hedge window then unwind.
 pub struct HedgeTracker {
     unhedged: Vec<UnhedgedFill>,
     hedge_timeout: Duration,
@@ -78,38 +74,48 @@ impl HedgeTracker {
         }
     }
 
-    /// Record a fill that needs hedging.
+    /// Record a fill. If a complement fill already exists for the same
+    /// condition_id (different token), both are considered hedged and removed.
     pub fn record_fill(&mut self, fill: UnhedgedFill) {
-        self.unhedged.push(fill);
+        // Check if there's already a fill on the same condition but different token
+        let complement_idx = self.unhedged.iter().position(|f| {
+            f.condition_id == fill.condition_id && f.token_id != fill.token_id
+        });
+
+        if let Some(idx) = complement_idx {
+            // Both sides filled → hedged, remove the existing one
+            let matched = self.unhedged.remove(idx);
+            info!(
+                "🔒 HEDGED condition={} ({}@{} + {}@{})",
+                fill.condition_id,
+                matched.size, matched.price,
+                fill.size, fill.price,
+            );
+            // Don't add the new fill either — pair is complete
+        } else {
+            self.unhedged.push(fill);
+        }
     }
 
-    /// Mark a fill as hedged (remove from tracker).
+    /// Mark a fill as hedged by token_id (external hedge or manual close).
     pub fn mark_hedged(&mut self, token_id: &str) {
         self.unhedged.retain(|f| f.token_id != token_id);
     }
 
-    /// Get fills that have breached their hedge SLA.
+    /// Get fills that have exceeded the hedge window and need unwinding.
+    /// Returns SELL intents to flatten the positions.
+    pub fn expired_unwinds(&self, books: &BookStore) -> Vec<OrderIntent> {
+        self.unhedged
+            .iter()
+            .filter(|f| f.hedge_expired(self.hedge_timeout))
+            .filter_map(|f| f.unwind_intent(books))
+            .collect()
+    }
+
+    /// Check if any fills are still waiting for their complement.
     #[allow(dead_code)]
-    pub fn breached_fills(&self) -> Vec<&UnhedgedFill> {
-        self.unhedged
-            .iter()
-            .filter(|f| f.hedge_sla_breached(self.hedge_timeout))
-            .collect()
-    }
-
-    /// Check if any fill is in an emergency state (SLA breached).
-    pub fn has_emergency(&self) -> bool {
-        self.unhedged
-            .iter()
-            .any(|f| f.hedge_sla_breached(self.hedge_timeout))
-    }
-
-    /// Get all pending hedges with their intended orders.
-    pub fn pending_hedges(&self, books: &BookStore) -> Vec<OrderIntent> {
-        self.unhedged
-            .iter()
-            .filter_map(|f| f.hedge_intent(books))
-            .collect()
+    pub fn has_pending(&self) -> bool {
+        !self.unhedged.is_empty()
     }
 
     #[allow(dead_code)]
@@ -117,6 +123,7 @@ impl HedgeTracker {
         self.unhedged.len()
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.unhedged.clear();
     }
@@ -447,9 +454,10 @@ mod tests {
     // --- UnhedgedFill tests ---
 
     #[test]
-    fn unhedged_fill_sla_not_breached() {
+    fn unhedged_fill_not_expired() {
         let fill = UnhedgedFill {
             token_id: "t1".into(),
+            condition_id: "cond1".into(),
             side: Side::Buy,
             price: dec!(0.50),
             size: dec!(10),
@@ -457,27 +465,29 @@ mod tests {
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
         };
-        assert!(!fill.hedge_sla_breached(Duration::from_millis(500)));
+        assert!(!fill.hedge_expired(Duration::from_secs(300)));
     }
 
     #[test]
-    fn unhedged_fill_sla_breached() {
+    fn unhedged_fill_expired() {
         let fill = UnhedgedFill {
             token_id: "t1".into(),
+            condition_id: "cond1".into(),
             side: Side::Buy,
             price: dec!(0.50),
             size: dec!(10),
-            filled_at: Instant::now() - Duration::from_secs(1),
+            filled_at: Instant::now() - Duration::from_secs(301),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
         };
-        assert!(fill.hedge_sla_breached(Duration::from_millis(500)));
+        assert!(fill.hedge_expired(Duration::from_secs(300)));
     }
 
     #[test]
-    fn hedge_intent_buy_fill_sells() {
+    fn unwind_intent_sells_at_best_bid() {
         let fill = UnhedgedFill {
             token_id: "token1".into(),
+            condition_id: "cond1".into(),
             side: Side::Buy,
             price: dec!(0.52),
             size: dec!(10),
@@ -486,17 +496,18 @@ mod tests {
             fee_rate_bps: Decimal::ZERO,
         };
         let books = make_book_store("0.48", "0.52");
-        let intent = fill.hedge_intent(&books).unwrap();
+        let intent = fill.unwind_intent(&books).unwrap();
         assert!(matches!(intent.side, Side::Sell));
-        assert_eq!(intent.price, dec!(0.48)); // sell at bid
+        assert_eq!(intent.price, dec!(0.48)); // sell at best bid
         assert_eq!(intent.size, dec!(10));
         assert!(!intent.post_only);
     }
 
     #[test]
-    fn hedge_intent_inherits_neg_risk_and_fee() {
+    fn unwind_intent_inherits_neg_risk_and_fee() {
         let fill = UnhedgedFill {
             token_id: "token1".into(),
+            condition_id: "cond1".into(),
             side: Side::Buy,
             price: dec!(0.52),
             size: dec!(10),
@@ -505,32 +516,16 @@ mod tests {
             fee_rate_bps: dec!(20),
         };
         let books = make_book_store("0.48", "0.52");
-        let intent = fill.hedge_intent(&books).unwrap();
-        assert!(intent.neg_risk, "hedge must inherit neg_risk from fill");
-        assert_eq!(intent.fee_rate_bps, dec!(20), "hedge must inherit fee_rate_bps");
+        let intent = fill.unwind_intent(&books).unwrap();
+        assert!(intent.neg_risk);
+        assert_eq!(intent.fee_rate_bps, dec!(20));
     }
 
     #[test]
-    fn hedge_intent_sell_fill_buys() {
-        let fill = UnhedgedFill {
-            token_id: "token1".into(),
-            side: Side::Sell,
-            price: dec!(0.48),
-            size: dec!(10),
-            filled_at: Instant::now(),
-            neg_risk: false,
-            fee_rate_bps: Decimal::ZERO,
-        };
-        let books = make_book_store("0.48", "0.52");
-        let intent = fill.hedge_intent(&books).unwrap();
-        assert!(matches!(intent.side, Side::Buy));
-        assert_eq!(intent.price, dec!(0.52)); // buy at ask
-    }
-
-    #[test]
-    fn hedge_intent_no_book_returns_none() {
+    fn unwind_intent_no_book_returns_none() {
         let fill = UnhedgedFill {
             token_id: "nonexistent".into(),
+            condition_id: "cond1".into(),
             side: Side::Buy,
             price: dec!(0.50),
             size: dec!(10),
@@ -539,18 +534,19 @@ mod tests {
             fee_rate_bps: Decimal::ZERO,
         };
         let books = BookStore::new();
-        assert!(fill.hedge_intent(&books).is_none());
+        assert!(fill.unwind_intent(&books).is_none());
     }
 
     // --- HedgeTracker tests ---
 
     #[test]
     fn tracker_record_and_count() {
-        let mut tracker = HedgeTracker::new(Duration::from_millis(500));
+        let mut tracker = HedgeTracker::new(Duration::from_secs(300));
         assert_eq!(tracker.unhedged_count(), 0);
 
         tracker.record_fill(UnhedgedFill {
             token_id: "t1".into(),
+            condition_id: "cond1".into(),
             side: Side::Buy,
             price: dec!(0.50),
             size: dec!(10),
@@ -562,10 +558,69 @@ mod tests {
     }
 
     #[test]
-    fn tracker_mark_hedged() {
-        let mut tracker = HedgeTracker::new(Duration::from_millis(500));
+    fn tracker_complement_fill_auto_hedges() {
+        let mut tracker = HedgeTracker::new(Duration::from_secs(300));
+
+        // First fill: BUY YES on cond1
+        tracker.record_fill(UnhedgedFill {
+            token_id: "yes_token".into(),
+            condition_id: "cond1".into(),
+            side: Side::Buy,
+            price: dec!(0.48),
+            size: dec!(10),
+            filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+        });
+        assert_eq!(tracker.unhedged_count(), 1);
+
+        // Second fill: BUY NO on same condition → auto-hedged
+        tracker.record_fill(UnhedgedFill {
+            token_id: "no_token".into(),
+            condition_id: "cond1".into(),
+            side: Side::Buy,
+            price: dec!(0.52),
+            size: dec!(10),
+            filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+        });
+        assert_eq!(tracker.unhedged_count(), 0); // both removed
+    }
+
+    #[test]
+    fn tracker_different_conditions_not_matched() {
+        let mut tracker = HedgeTracker::new(Duration::from_secs(300));
+
         tracker.record_fill(UnhedgedFill {
             token_id: "t1".into(),
+            condition_id: "cond1".into(),
+            side: Side::Buy,
+            price: dec!(0.50),
+            size: dec!(10),
+            filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+        });
+        tracker.record_fill(UnhedgedFill {
+            token_id: "t2".into(),
+            condition_id: "cond2".into(),
+            side: Side::Buy,
+            price: dec!(0.50),
+            size: dec!(10),
+            filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+        });
+        assert_eq!(tracker.unhedged_count(), 2); // different conditions, not matched
+    }
+
+    #[test]
+    fn tracker_mark_hedged() {
+        let mut tracker = HedgeTracker::new(Duration::from_secs(300));
+        tracker.record_fill(UnhedgedFill {
+            token_id: "t1".into(),
+            condition_id: "cond1".into(),
             side: Side::Buy,
             price: dec!(0.50),
             size: dec!(10),
@@ -578,10 +633,13 @@ mod tests {
     }
 
     #[test]
-    fn tracker_breached_fills() {
-        let mut tracker = HedgeTracker::new(Duration::from_millis(500));
+    fn tracker_expired_unwinds() {
+        let mut tracker = HedgeTracker::new(Duration::from_millis(100));
+
+        // Old fill (expired)
         tracker.record_fill(UnhedgedFill {
-            token_id: "t1".into(),
+            token_id: "token1".into(),
+            condition_id: "cond1".into(),
             side: Side::Buy,
             price: dec!(0.50),
             size: dec!(10),
@@ -589,9 +647,11 @@ mod tests {
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
         });
+        // Fresh fill (not expired)
         tracker.record_fill(UnhedgedFill {
-            token_id: "t2".into(),
-            side: Side::Sell,
+            token_id: "token2".into(),
+            condition_id: "cond2".into(),
+            side: Side::Buy,
             price: dec!(0.50),
             size: dec!(5),
             filled_at: Instant::now(),
@@ -599,52 +659,19 @@ mod tests {
             fee_rate_bps: Decimal::ZERO,
         });
 
-        let breached = tracker.breached_fills();
-        assert_eq!(breached.len(), 1);
-        assert_eq!(breached[0].token_id, "t1");
-    }
-
-    #[test]
-    fn tracker_has_emergency() {
-        let mut tracker = HedgeTracker::new(Duration::from_millis(500));
-        assert!(!tracker.has_emergency());
-
-        tracker.record_fill(UnhedgedFill {
-            token_id: "t1".into(),
-            side: Side::Buy,
-            price: dec!(0.50),
-            size: dec!(10),
-            filled_at: Instant::now() - Duration::from_secs(1),
-            neg_risk: false,
-            fee_rate_bps: Decimal::ZERO,
-        });
-        assert!(tracker.has_emergency());
-    }
-
-    #[test]
-    fn tracker_pending_hedges() {
-        let mut tracker = HedgeTracker::new(Duration::from_millis(500));
-        tracker.record_fill(UnhedgedFill {
-            token_id: "token1".into(),
-            side: Side::Buy,
-            price: dec!(0.52),
-            size: dec!(10),
-            filled_at: Instant::now(),
-            neg_risk: false,
-            fee_rate_bps: Decimal::ZERO,
-        });
-
         let books = make_book_store("0.48", "0.52");
-        let hedges = tracker.pending_hedges(&books);
-        assert_eq!(hedges.len(), 1);
-        assert!(matches!(hedges[0].side, Side::Sell));
+        let unwinds = tracker.expired_unwinds(&books);
+        assert_eq!(unwinds.len(), 1);
+        assert!(matches!(unwinds[0].side, Side::Sell)); // sells to flatten
+        assert_eq!(unwinds[0].price, dec!(0.48)); // at best bid
     }
 
     #[test]
     fn tracker_clear() {
-        let mut tracker = HedgeTracker::new(Duration::from_millis(500));
+        let mut tracker = HedgeTracker::new(Duration::from_secs(300));
         tracker.record_fill(UnhedgedFill {
             token_id: "t1".into(),
+            condition_id: "cond1".into(),
             side: Side::Buy,
             price: dec!(0.50),
             size: dec!(10),
