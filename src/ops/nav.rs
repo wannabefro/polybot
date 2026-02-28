@@ -37,6 +37,7 @@ async fn fetch_clob_balance(
         .build();
 
     let resp = client.balance_allowance(request).await?;
+    debug!(raw_balance = %resp.balance, allowances = ?resp.allowances, "nav: CLOB response");
     use rust_decimal::prelude::ToPrimitive;
     Ok(resp.balance.to_f64().unwrap_or(0.0))
 }
@@ -62,19 +63,29 @@ pub fn spawn(
     let handle = tokio::spawn(async move {
         let mut ticker = time::interval(poll_interval);
         let mut last_nav = initial_nav;
+        let mut ever_seen_nonzero = false;
 
         loop {
             ticker.tick().await;
 
             match fetch_clob_balance(&client).await {
                 Ok(balance) => {
-                    // In paper mode, on-chain balance is static — the "real" NAV
-                    // is the on-chain balance (we don't add paper PnL since the
-                    // risk engine already tracks that for daily loss stops).
+                    if balance > 0.0 {
+                        ever_seen_nonzero = true;
+                    }
+
+                    // Don't slam NAV to 0 unless we've previously seen a real
+                    // balance (protects against API returning 0 when funds are
+                    // tied up in conditional tokens / positions).
                     let total = if paper_mode {
-                        // Use whichever is higher: CLOB balance or initial
-                        // (paper mode may start with a virtual NAV > actual balance)
                         balance.max(initial_nav)
+                    } else if balance <= 0.0 && !ever_seen_nonzero {
+                        warn!(
+                            configured_nav = format!("{initial_nav:.2}"),
+                            "nav: CLOB returned 0 — keeping configured NAV \
+                             (funds may be in positions, not free collateral)"
+                        );
+                        initial_nav
                     } else {
                         balance
                     };
