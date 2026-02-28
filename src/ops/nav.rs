@@ -31,13 +31,21 @@ pub struct NavSnapshot {
 /// Fetch collateral balance from the CLOB exchange API.
 async fn fetch_clob_balance(
     client: &Client<Authenticated<Normal>>,
+    first_call: bool,
 ) -> Result<f64> {
     let request = BalanceAllowanceRequest::builder()
         .asset_type(AssetType::Collateral)
         .build();
 
     let resp = client.balance_allowance(request).await?;
-    debug!(raw_balance = %resp.balance, allowances = ?resp.allowances, "nav: CLOB response");
+
+    // Log at INFO on first call for diagnostics, then debug
+    if first_call {
+        info!(raw_balance = %resp.balance, allowances = ?resp.allowances, "nav: first CLOB balance-allowance response");
+    } else {
+        debug!(raw_balance = %resp.balance, allowances = ?resp.allowances, "nav: CLOB response");
+    }
+
     use rust_decimal::prelude::ToPrimitive;
     Ok(resp.balance.to_f64().unwrap_or(0.0))
 }
@@ -65,11 +73,14 @@ pub fn spawn(
         let mut last_nav = initial_nav;
         let mut ever_seen_nonzero = false;
 
+        let mut first_call = true;
+
         loop {
             ticker.tick().await;
 
-            match fetch_clob_balance(&client).await {
+            match fetch_clob_balance(&client, first_call).await {
                 Ok(balance) => {
+                    first_call = false;
                     if balance > 0.0 {
                         ever_seen_nonzero = true;
                     }
