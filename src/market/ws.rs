@@ -40,8 +40,12 @@ pub fn spawn(
         loop {
             // Collect all token IDs from the current universe.
             // Cap to max_ws_tokens to avoid overwhelming the WS server.
+            // Prioritize rewards-active markets (most profitable for small accounts).
             let universe = uni_rx.borrow_and_update().clone();
-            let new_ids: Vec<String> = universe
+            let mut sorted: Vec<&TradableMarket> = universe.iter().collect();
+            sorted.sort_by(|a, b| b.rewards_active.cmp(&a.rewards_active)
+                .then(b.volume_24h.partial_cmp(&a.volume_24h).unwrap_or(std::cmp::Ordering::Equal)));
+            let new_ids: Vec<String> = sorted
                 .iter()
                 .flat_map(|m| m.tokens.iter().map(|t| t.token_id.clone()))
                 .take(max_ws_tokens)

@@ -418,10 +418,15 @@ async fn main() -> Result<()> {
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;
                         }
-                        mm_count += 1;
+                        // Only count toward max_markets if we have book data
+                        let has_book = market.tokens.iter().any(|t| books.get(&t.token_id).is_some());
+                        if !has_book {
+                            continue;
+                        }
                         let quotes = strategy::rebate_mm::generate_quotes(
                             &cfg, market, &books, &risk_engine,
                         );
+                        mm_count += 1;
                         for (mut bid, mut ask) in quotes {
                             if !scale_intent_size(&mut bid, risk_multiplier, market.min_order_size) {
                                 continue;
@@ -480,10 +485,14 @@ async fn main() -> Result<()> {
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;
                         }
-                        rw_count += 1;
+                        let has_book = market.tokens.iter().any(|t| books.get(&t.token_id).is_some());
+                        if !has_book {
+                            continue;
+                        }
                         let quotes = strategy::reward::evaluate_reward_quote(
                             &cfg, market, &books, &risk_engine,
                         );
+                        rw_count += 1;
                         for (mut bid, mut ask) in quotes {
                             if !scale_intent_size(&mut bid, risk_multiplier, market.min_order_size) {
                                 continue;
