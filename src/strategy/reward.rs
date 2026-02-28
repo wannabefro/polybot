@@ -16,9 +16,6 @@ use crate::market::discovery::TradableMarket;
 use crate::order::pipeline::OrderIntent;
 use crate::risk::guardrails::{RiskEngine, RiskVerdict};
 
-/// Minimum reward-to-spread ratio to justify entry.
-const MIN_REWARD_SPREAD_RATIO: Decimal = dec!(1.5);
-
 /// A fill that needs hedging.
 #[derive(Debug, Clone)]
 pub struct UnhedgedFill {

@@ -48,6 +48,7 @@ impl LocalBook {
         Some((best_bid + best_ask) / Decimal::TWO)
     }
 
+    #[allow(dead_code)]
     pub fn spread(&self) -> Option<Decimal> {
         let best_bid = self.bids.best()?.price;
         let best_ask = self.asks.best()?.price;
@@ -148,6 +149,7 @@ impl BookStore {
     }
 
     /// Total number of tracked books.
+    #[allow(dead_code)]
     pub fn count(&self) -> usize {
         self.inner.read().len()
     }
