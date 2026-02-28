@@ -1,0 +1,42 @@
+[package]
+name = "polybot"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.76.0"
+
+[dependencies]
+# Polymarket SDK (git until crates.io publishes edition-2024 compatible version)
+polymarket-client-sdk = { git = "https://github.com/Polymarket/rs-clob-client", features = [
+    "clob", "gamma", "ws", "heartbeats", "data", "tracing",
+] }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tokio-util = "0.7"
+
+# HTTP + WebSocket
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Utilities
+rust_decimal = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+anyhow = "1"
+dashmap = "6"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+todo = "warn"
