@@ -387,9 +387,23 @@ async fn main() -> Result<()> {
                 }
 
                 // Cancel stale maker quotes before refreshing.
+                // Protect complement quotes for unhedged fills — they need time to fill.
+                let unhedged_conds = hedge_tracker.unhedged_conditions();
                 let stale_quotes: Vec<(String, String)> = active_quotes
                     .iter()
-                    .filter(|(_, q)| q.placed_at.elapsed() >= cfg.quote_max_age)
+                    .filter(|(_, q)| {
+                        if q.placed_at.elapsed() < cfg.quote_max_age {
+                            return false; // not stale yet
+                        }
+                        // If this quote's condition has an unhedged fill,
+                        // protect it up to the hedge timeout
+                        if unhedged_conds.contains(&q.condition_id)
+                            && q.placed_at.elapsed() < cfg.hedge_timeout
+                        {
+                            return false; // protected complement
+                        }
+                        true
+                    })
                     .map(|(k, q)| (k.clone(), q.order_id.clone()))
                     .collect();
                 for (key, order_id) in stale_quotes {
@@ -450,6 +464,10 @@ async fn main() -> Result<()> {
                         }
                         if mm_count >= max_markets {
                             break;
+                        }
+                        // Skip markets with unhedged single-sided fills
+                        if unhedged_conds.contains(&market.condition_id) {
+                            continue;
                         }
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;
@@ -529,6 +547,10 @@ async fn main() -> Result<()> {
                     for market in universe.iter().filter(|m| m.rewards_active) {
                         if rw_count >= max_markets {
                             break;
+                        }
+                        // Skip markets with unhedged single-sided fills
+                        if unhedged_conds.contains(&market.condition_id) {
+                            continue;
                         }
                         if market.neg_risk && market.tokens.iter().any(|t| neg_risk_stale.contains(&t.token_id)) {
                             continue;

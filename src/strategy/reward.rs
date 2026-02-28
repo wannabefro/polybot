@@ -118,6 +118,12 @@ impl HedgeTracker {
         !self.unhedged.is_empty()
     }
 
+    /// Get condition_ids that have unhedged single-sided fills.
+    /// Markets with these conditions should NOT receive new quotes.
+    pub fn unhedged_conditions(&self) -> std::collections::HashSet<String> {
+        self.unhedged.iter().map(|f| f.condition_id.clone()).collect()
+    }
+
     #[allow(dead_code)]
     pub fn unhedged_count(&self) -> usize {
         self.unhedged.len()
@@ -681,6 +687,40 @@ mod tests {
         });
         tracker.clear();
         assert_eq!(tracker.unhedged_count(), 0);
+    }
+
+    #[test]
+    fn tracker_unhedged_conditions_blocks_quoting() {
+        let mut tracker = HedgeTracker::new(Duration::from_secs(300));
+        assert!(tracker.unhedged_conditions().is_empty());
+
+        tracker.record_fill(UnhedgedFill {
+            token_id: "yes_token".into(),
+            condition_id: "cond_btc".into(),
+            side: Side::Buy,
+            price: dec!(0.48),
+            size: dec!(10),
+            filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+        });
+
+        let blocked = tracker.unhedged_conditions();
+        assert!(blocked.contains("cond_btc"));
+        assert!(!blocked.contains("cond_other"));
+
+        // Complement fills → condition unblocked
+        tracker.record_fill(UnhedgedFill {
+            token_id: "no_token".into(),
+            condition_id: "cond_btc".into(),
+            side: Side::Buy,
+            price: dec!(0.52),
+            size: dec!(10),
+            filled_at: Instant::now(),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+        });
+        assert!(tracker.unhedged_conditions().is_empty());
     }
 
     // --- evaluate_reward_quote tests ---
