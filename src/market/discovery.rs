@@ -23,6 +23,7 @@ pub struct TradableMarket {
     pub min_order_size: Decimal,
     pub maker_fee_bps: Decimal,
     pub rewards_active: bool,
+    pub volume_24h: f64,
     pub tags: Vec<String>,
 }
 
@@ -81,6 +82,8 @@ async fn fetch_all_markets(client: &AuthClient) -> Result<Vec<TradableMarket>> {
                 min_order_size: m.minimum_order_size,
                 maker_fee_bps: m.maker_base_fee,
                 rewards_active: m.rewards.rates.iter().any(|r| r.rewards_daily_rate > Decimal::ZERO),
+                // volume_24h not available from CLOB API; enriched via Gamma API later
+                volume_24h: 0.0,
                 tags: m.tags.clone(),
             });
         }

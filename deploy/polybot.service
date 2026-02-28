@@ -1,0 +1,33 @@
+[Unit]
+Description=Polymarket Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polybot
+Group=polybot
+WorkingDirectory=/opt/polybot
+ExecStart=/opt/polybot/polybot
+EnvironmentFile=/opt/polybot/.env
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/polybot/data
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=512M
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polybot
+
+[Install]
+WantedBy=multi-user.target
