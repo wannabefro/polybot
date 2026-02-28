@@ -22,11 +22,14 @@ async fn main() -> anyhow::Result<()> {
 
     info!("polybot starting");
 
+    let cfg = config::Config::from_env()?;
+
     // Phase 1: compliance gate
     geoblock::check_or_abort().await?;
+    let (_geo_handle, mut geo_rx) = geoblock::spawn_monitor(&cfg);
 
     // Phase 2: auth
-    let _credentials = auth::init().await?;
+    let _client = auth::init(&cfg).await?;
 
     // Phase 3: market discovery + data feeds
     // Phase 4: risk engine + strategies
@@ -34,7 +37,13 @@ async fn main() -> anyhow::Result<()> {
 
     info!("polybot ready — entering event loop (paper mode)");
 
-    tokio::signal::ctrl_c().await?;
-    info!("shutting down");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("ctrl-c received — shutting down");
+        }
+        _ = geo_rx.changed() => {
+            info!("geoblock triggered — emergency shutdown");
+        }
+    }
     Ok(())
 }
