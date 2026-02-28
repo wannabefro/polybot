@@ -94,24 +94,34 @@ impl BookStore {
         }
 
         let bids = BookSide {
-            levels: update
-                .bids
-                .iter()
-                .map(|l| Level {
-                    price: l.price,
-                    size: l.size,
-                })
-                .collect(),
+            levels: {
+                let mut lvls: Vec<Level> = update
+                    .bids
+                    .iter()
+                    .map(|l| Level {
+                        price: l.price,
+                        size: l.size,
+                    })
+                    .collect();
+                // Sort descending so best (highest) bid is first
+                lvls.sort_by(|a, b| b.price.cmp(&a.price));
+                lvls
+            },
         };
         let asks = BookSide {
-            levels: update
-                .asks
-                .iter()
-                .map(|l| Level {
-                    price: l.price,
-                    size: l.size,
-                })
-                .collect(),
+            levels: {
+                let mut lvls: Vec<Level> = update
+                    .asks
+                    .iter()
+                    .map(|l| Level {
+                        price: l.price,
+                        size: l.size,
+                    })
+                    .collect();
+                // Sort ascending so best (lowest) ask is first
+                lvls.sort_by(|a, b| a.price.cmp(&b.price));
+                lvls
+            },
         };
 
         let book = LocalBook {

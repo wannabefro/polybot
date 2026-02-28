@@ -171,17 +171,24 @@ fn evaluate_token_reward(
         return None;
     }
 
-    // Tight spread for reward qualification
-    let half_spread = market.min_tick_size;
-    let mut bid_price = round_to_tick(mid - half_spread, market.min_tick_size);
-    let mut ask_price = round_to_tick(mid + half_spread, market.min_tick_size);
+    // For post-only safety, anchor to current best bid/ask rather than mid.
+    // This avoids crossing when our snapshot is slightly stale.
+    let tick = market.min_tick_size;
+    let mut bid_price = best_bid; // join the best bid
+    let mut ask_price = best_ask; // join the best ask
 
-    // Enforce rewards_max_spread: tighten if spread exceeds constraint
+    // Enforce rewards_max_spread: tighten if our spread exceeds constraint
     if let Some(max_spread) = market.rewards_max_spread {
         if (ask_price - bid_price) > max_spread {
+            // Tighten symmetrically around mid
             let tight_half = max_spread / Decimal::TWO;
-            bid_price = round_to_tick(mid - tight_half, market.min_tick_size);
-            ask_price = round_to_tick(mid + tight_half, market.min_tick_size);
+            bid_price = round_to_tick(mid + tight_half, tick).min(best_bid);
+            ask_price = round_to_tick(mid - tight_half, tick).max(best_ask);
+            // If still too wide after clamping, try joining inside the book
+            if (ask_price - bid_price) > max_spread {
+                bid_price = round_to_tick(mid - tight_half, tick);
+                ask_price = round_to_tick(mid + tight_half, tick);
+            }
             if ask_price <= bid_price {
                 debug!(market = %market.question, "reward: can't tighten enough for max_spread");
                 return None;
@@ -189,12 +196,12 @@ fn evaluate_token_reward(
         }
     }
 
-    // Post-only safety: clamp so we never cross the book
+    // Final post-only safety: must not cross book
     if bid_price >= best_ask {
-        bid_price = best_ask - market.min_tick_size;
+        bid_price = best_ask - tick;
     }
     if ask_price <= best_bid {
-        ask_price = best_bid + market.min_tick_size;
+        ask_price = best_bid + tick;
     }
     if bid_price <= Decimal::ZERO || ask_price <= bid_price {
         debug!(market = %market.question, "reward: can't place without crossing book");
@@ -255,10 +262,12 @@ fn evaluate_token_reward(
 
     info!(
         market = %market.question,
+        best_bid = %best_bid,
+        best_ask = %best_ask,
         bid = %bid_price,
         ask = %ask_price,
         size = %size,
-        "reward: quoting for reward capture"
+        "reward: quoting"
     );
 
     Some((bid_intent, ask_intent))

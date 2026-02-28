@@ -527,6 +527,11 @@ async fn main() -> Result<()> {
                             rw_empty_quotes += 1;
                         }
                         for (mut bid, mut ask) in quotes {
+                            // Cap total pending orders to avoid exceeding available collateral
+                            // Each bid+ask pair locks ~2×size in USDC; limit to 3 pairs
+                            if reward_intents.len() >= 6 {
+                                break;
+                            }
                             if !scale_intent_size(&mut bid, risk_multiplier, market.min_order_size) {
                                 continue;
                             }
@@ -576,7 +581,14 @@ async fn main() -> Result<()> {
                                 }
                                 risk_engine.reset_cancel_failures();
                             }
-                            Err(e) => error!(err = %e, "reward place failed"),
+                            Err(e) => {
+                                let msg = e.to_string();
+                                if msg.contains("crosses book") || msg.contains("not enough balance") {
+                                    warn!(err = %e, "reward place rejected (transient)");
+                                } else {
+                                    error!(err = %e, "reward place failed");
+                                }
+                            }
                         }
                     }
                 }
