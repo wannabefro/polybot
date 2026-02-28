@@ -167,16 +167,28 @@ async fn main() -> Result<()> {
     );
 
     // ── Phase 5: Order routing + metrics ───────────────────────
-    let router = OrderRouter::new(&cfg, auth_ctx);
+    let router = OrderRouter::new(&cfg, auth_ctx.clone());
     let metrics = Metrics::new();
+
+    // ── Phase 6: Live NAV tracker ──────────────────────────────
+    let wallet_address = format!("{:#x}", auth_ctx.signer.address());
+    let (_nav_handle, mut nav_rx) = ops::nav::spawn(
+        wallet_address,
+        cfg.nav_usdc,
+        cfg.paper_mode,
+        cfg.position_recon_interval, // reuse recon interval for NAV polls
+        ops::nav::polygon_rpc_from_env(),
+        ops::nav::usdc_contract_from_env(),
+    );
 
     // Strategy state
     let mut mean_revert = MeanRevertState::new();
     let mut hedge_tracker = HedgeTracker::new(cfg.hedge_timeout);
     let mut active_quotes: HashMap<String, ActiveQuote> = HashMap::new();
-    let reward_enabled = cfg.nav_usdc >= cfg.reward_min_nav_usdc;
-    let mean_revert_enabled = cfg.nav_usdc >= cfg.mean_revert_min_nav_usdc;
-    let max_markets = cfg.max_active_markets();
+    let mut reward_enabled = cfg.nav_usdc >= cfg.reward_min_nav_usdc;
+    let mut mean_revert_enabled = cfg.nav_usdc >= cfg.mean_revert_min_nav_usdc;
+    let mut max_markets = cfg.max_active_markets();
+    let mut live_nav = cfg.nav_usdc;
 
     info!(
         paper_mode = cfg.paper_mode,
@@ -211,6 +223,33 @@ async fn main() -> Result<()> {
                     active_quotes.clear();
                 }
                 break;
+            }
+
+            // ── Live NAV update ──
+            Ok(()) = nav_rx.changed() => {
+                let snap = nav_rx.borrow().clone();
+                let new_nav = snap.total_nav;
+                if (new_nav - live_nav).abs() >= 1.0 {
+                    // Update risk limits
+                    risk_engine.update_nav(new_nav, &cfg);
+
+                    // Re-evaluate strategy gates and market caps
+                    let mut nav_cfg = cfg.clone();
+                    nav_cfg.nav_usdc = new_nav;
+                    reward_enabled = new_nav >= cfg.reward_min_nav_usdc;
+                    mean_revert_enabled = new_nav >= cfg.mean_revert_min_nav_usdc;
+                    max_markets = nav_cfg.max_active_markets();
+
+                    info!(
+                        old_nav = format!("{live_nav:.2}"),
+                        new_nav = format!("{new_nav:.2}"),
+                        reward_enabled,
+                        mean_revert_enabled,
+                        max_active_markets = max_markets,
+                        "nav: risk limits recalculated"
+                    );
+                    live_nav = new_nav;
+                }
             }
 
             // ── WS book updates → BookStore ──
@@ -635,6 +674,7 @@ async fn main() -> Result<()> {
                 let halted = risk_engine.is_halted();
 
                 info!(
+                    nav = format!("{live_nav:.2}"),
                     markets = universe.len(),
                     books = %format!("{}/{}", books_populated, books_total),
                     active_quotes = active_quotes.len(),

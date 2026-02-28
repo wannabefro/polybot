@@ -21,10 +21,11 @@ pub enum RiskVerdict {
 #[derive(Debug)]
 pub struct RiskEngine {
     /// Pre-computed Decimal risk limits (avoids f64→Decimal on every check).
-    limit_per_market: Decimal,
-    limit_gross: Decimal,
-    limit_daily_loss: Decimal,
-    limit_inventory: Decimal,
+    /// Wrapped in RwLock so update_nav() can recalculate them live.
+    limit_per_market: RwLock<Decimal>,
+    limit_gross: RwLock<Decimal>,
+    limit_daily_loss: RwLock<Decimal>,
+    limit_inventory: RwLock<Decimal>,
     /// Per-market net notional exposure (condition_id → signed USDC notional).
     /// Positive = net long, negative = net short.
     market_exposure: RwLock<HashMap<String, Decimal>>,
@@ -67,10 +68,10 @@ impl RiskEngine {
         );
 
         Arc::new(Self {
-            limit_per_market,
-            limit_gross,
-            limit_daily_loss,
-            limit_inventory,
+            limit_per_market: RwLock::new(limit_per_market),
+            limit_gross: RwLock::new(limit_gross),
+            limit_daily_loss: RwLock::new(limit_daily_loss),
+            limit_inventory: RwLock::new(limit_inventory),
             market_exposure: RwLock::new(HashMap::new()),
             token_inventory: RwLock::new(HashMap::new()),
             token_cashflow: RwLock::new(HashMap::new()),
@@ -101,9 +102,10 @@ impl RiskEngine {
             .copied()
             .unwrap_or(Decimal::ZERO);
         let projected = current + delta_notional;
-        if projected.abs() > self.limit_per_market {
+        let lim_per_market = *self.limit_per_market.read();
+        if projected.abs() > lim_per_market {
             return RiskVerdict::Rejected(format!(
-                "per-market limit: |{projected}| > {}", self.limit_per_market
+                "per-market limit: |{projected}| > {lim_per_market}"
             ));
         }
 
@@ -115,17 +117,19 @@ impl RiskEngine {
             .map(|v| v.abs())
             .sum();
         let gross_projected = gross - current.abs() + projected.abs();
-        if gross_projected > self.limit_gross {
+        let lim_gross = *self.limit_gross.read();
+        if gross_projected > lim_gross {
             return RiskVerdict::Rejected(format!(
-                "gross exposure limit: {gross_projected} > {}", self.limit_gross
+                "gross exposure limit: {gross_projected} > {lim_gross}"
             ));
         }
 
         // 3. Daily loss stop (3% NAV default)
         let pnl = *self.daily_pnl.read();
-        if pnl < -self.limit_daily_loss {
+        let lim_daily = *self.limit_daily_loss.read();
+        if pnl < -lim_daily {
             return RiskVerdict::Rejected(format!(
-                "daily loss stop: P&L {pnl} < -{}", self.limit_daily_loss
+                "daily loss stop: P&L {pnl} < -{lim_daily}"
             ));
         }
 
@@ -143,9 +147,10 @@ impl RiskEngine {
         };
         let new_inv = current_inv + delta;
         let inv_notional = new_inv.abs() * intent.price;
-        if inv_notional > self.limit_inventory {
+        let lim_inv = *self.limit_inventory.read();
+        if inv_notional > lim_inv {
             return RiskVerdict::Rejected(format!(
-                "one-sided inventory: {inv_notional} > {}", self.limit_inventory
+                "one-sided inventory: {inv_notional} > {lim_inv}"
             ));
         }
 
@@ -271,6 +276,36 @@ impl RiskEngine {
     /// Snapshot of all token inventory (for position reconciliation).
     pub fn inventory_snapshot(&self) -> HashMap<String, Decimal> {
         self.token_inventory.read().clone()
+    }
+
+    /// Recalculate risk limits for a new NAV value.
+    ///
+    /// Called when the live NAV tracker detects a balance change.
+    /// Uses the config fractions to recompute absolute USDC limits.
+    pub fn update_nav(&self, new_nav: f64, config: &Config) {
+        let mut cfg = config.clone();
+        cfg.nav_usdc = new_nav;
+
+        *self.limit_per_market.write() = safe_nav_decimal(
+            new_nav,
+            cfg.effective_max_notional_per_market(),
+            "per_market",
+        );
+        *self.limit_gross.write() = safe_nav_decimal(
+            new_nav,
+            cfg.effective_max_gross_exposure(),
+            "gross",
+        );
+        *self.limit_daily_loss.write() = safe_nav_decimal(
+            new_nav,
+            cfg.daily_loss_stop,
+            "daily_loss",
+        );
+        *self.limit_inventory.write() = safe_nav_decimal(
+            new_nav,
+            cfg.effective_max_one_sided_inventory(),
+            "inventory",
+        );
     }
 }
 
@@ -595,10 +630,10 @@ mod tests {
     fn pre_computed_limits_match_config() {
         let config = test_config();
         let engine = RiskEngine::new(config.clone());
-        assert_eq!(engine.limit_per_market, safe_nav_decimal(config.nav_usdc, config.effective_max_notional_per_market(), "pm"));
-        assert_eq!(engine.limit_gross, safe_nav_decimal(config.nav_usdc, config.effective_max_gross_exposure(), "ge"));
-        assert_eq!(engine.limit_daily_loss, safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "dl"));
-        assert_eq!(engine.limit_inventory, safe_nav_decimal(config.nav_usdc, config.effective_max_one_sided_inventory(), "inv"));
+        assert_eq!(*engine.limit_per_market.read(), safe_nav_decimal(config.nav_usdc, config.effective_max_notional_per_market(), "pm"));
+        assert_eq!(*engine.limit_gross.read(), safe_nav_decimal(config.nav_usdc, config.effective_max_gross_exposure(), "ge"));
+        assert_eq!(*engine.limit_daily_loss.read(), safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "dl"));
+        assert_eq!(*engine.limit_inventory.read(), safe_nav_decimal(config.nav_usdc, config.effective_max_one_sided_inventory(), "inv"));
     }
 
     #[test]
@@ -612,6 +647,39 @@ mod tests {
 
         // PnL = -50 + (100 * 0.60) = +10
         assert_eq!(engine.mark_to_market_pnl(&mids), Decimal::from(10));
+    }
+
+    #[test]
+    fn update_nav_recalculates_limits() {
+        let config = test_config();
+        let engine = RiskEngine::new(config.clone());
+        let old_per_market = *engine.limit_per_market.read();
+
+        // Double the NAV
+        engine.update_nav(20_000.0, &config);
+        let new_per_market = *engine.limit_per_market.read();
+
+        // Limits should roughly double
+        assert!(new_per_market > old_per_market);
+        assert_eq!(
+            new_per_market,
+            safe_nav_decimal(20_000.0, config.effective_max_notional_per_market(), "pm")
+        );
+    }
+
+    #[test]
+    fn update_nav_to_small_account_uses_boosted_caps() {
+        let config = test_config();
+        let engine = RiskEngine::new(config.clone());
+
+        // Shrink to small account
+        engine.update_nav(100.0, &config);
+        let per_market = *engine.limit_per_market.read();
+
+        // Small account at $100: 8% × 100 = $8
+        let mut small_cfg = config.clone();
+        small_cfg.nav_usdc = 100.0;
+        assert_eq!(per_market, safe_nav_decimal(100.0, small_cfg.effective_max_notional_per_market(), "pm"));
     }
 
     #[test]
