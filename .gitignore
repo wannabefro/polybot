@@ -1,4 +1,7 @@
 /target
 .env
+.env.local
+.env.*
+!deploy/.env.example
 *.pem
 *.key
