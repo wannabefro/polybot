@@ -106,7 +106,7 @@ impl Config {
             neg_risk_stale_secs: env_or("POLYBOT_NR_STALE_SECS", "10").parse()?,
             quote_tick_secs: env_or("POLYBOT_QUOTE_TICK_SECS", "5").parse()?,
             quote_max_age: Duration::from_secs(
-                env_or("POLYBOT_QUOTE_MAX_AGE_SECS", "20").parse()?,
+                env_or("POLYBOT_QUOTE_MAX_AGE_SECS", "60").parse()?,
             ),
             max_ws_tokens: env_or("POLYBOT_MAX_WS_TOKENS", "500").parse()?,
         })

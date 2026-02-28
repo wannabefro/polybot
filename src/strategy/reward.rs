@@ -29,6 +29,8 @@ pub struct UnhedgedFill {
     pub filled_at: Instant,
     pub neg_risk: bool,
     pub fee_rate_bps: Decimal,
+    /// Number of failed unwind attempts (FOK didn't fill).
+    pub unwind_attempts: u32,
 }
 
 impl UnhedgedFill {
@@ -75,7 +77,7 @@ impl HedgeTracker {
     }
 
     /// Record a fill. If a complement fill already exists for the same
-    /// condition_id (different token), both are considered hedged and removed.
+    /// condition_id (different token), match sizes and remove hedged portion.
     pub fn record_fill(&mut self, fill: UnhedgedFill) {
         // Check if there's already a fill on the same condition but different token
         let complement_idx = self.unhedged.iter().position(|f| {
@@ -83,15 +85,27 @@ impl HedgeTracker {
         });
 
         if let Some(idx) = complement_idx {
-            // Both sides filled → hedged, remove the existing one
-            let matched = self.unhedged.remove(idx);
+            let hedge_size = fill.size.min(self.unhedged[idx].size);
             info!(
                 "🔒 HEDGED condition={} ({}@{} + {}@{})",
                 fill.condition_id,
-                matched.size, matched.price,
+                self.unhedged[idx].size, self.unhedged[idx].price,
                 fill.size, fill.price,
             );
-            // Don't add the new fill either — pair is complete
+
+            // Reduce or remove existing fill
+            if self.unhedged[idx].size <= hedge_size {
+                self.unhedged.remove(idx);
+            } else {
+                self.unhedged[idx].size -= hedge_size;
+            }
+
+            // If new fill has remainder, keep it as unhedged
+            if fill.size > hedge_size {
+                let mut remainder = fill;
+                remainder.size -= hedge_size;
+                self.unhedged.push(remainder);
+            }
         } else {
             self.unhedged.push(fill);
         }
@@ -100,6 +114,24 @@ impl HedgeTracker {
     /// Mark a fill as hedged by token_id (external hedge or manual close).
     pub fn mark_hedged(&mut self, token_id: &str) {
         self.unhedged.retain(|f| f.token_id != token_id);
+    }
+
+    /// Increment unwind attempts for a token and return the new count.
+    pub fn record_unwind_attempt(&mut self, token_id: &str) -> u32 {
+        if let Some(f) = self.unhedged.iter_mut().find(|f| f.token_id == token_id) {
+            f.unwind_attempts += 1;
+            f.unwind_attempts
+        } else {
+            0
+        }
+    }
+
+    /// Remove fills that have exceeded max unwind attempts.
+    /// Returns the number of fills force-removed.
+    pub fn remove_stale_unwinds(&mut self, max_attempts: u32) -> usize {
+        let before = self.unhedged.len();
+        self.unhedged.retain(|f| f.unwind_attempts < max_attempts);
+        before - self.unhedged.len()
     }
 
     /// Get fills that have exceeded the hedge window and need unwinding.
@@ -163,12 +195,21 @@ pub fn evaluate_reward_quote(
         return Vec::new();
     }
 
-    // For multi-outcome (neg-risk) markets: place BUY orders on individual tokens
+    // For multi-outcome (neg-risk) markets: place BUY orders on individual tokens.
+    // Each token gets its own single-sided BUY intent (not a pair).
     let mut pairs = Vec::new();
+    let mut singles: Vec<OrderIntent> = Vec::new();
     for token in &market.tokens {
         if let Some(intent) = evaluate_single_buy_reward(config, market, token, books, risk) {
-            pairs.push(intent);
+            singles.push(intent);
         }
+    }
+    // Group consecutive singles into synthetic pairs for the caller.
+    // If odd count, last one gets duplicated (caller deduplicates by key).
+    let mut iter = singles.into_iter();
+    while let Some(first) = iter.next() {
+        let second = iter.next().unwrap_or_else(|| first.clone());
+        pairs.push((first, second));
     }
     pairs
 }
@@ -193,8 +234,9 @@ fn evaluate_binary_reward(
 
     let tick = market.min_tick_size;
 
-    // Our bid on token0: join best bid (BUY token0)
-    let mut bid_price = best_bid0;
+    // Our bid on token0: improve best bid by 1 tick for priority in reward queue.
+    // The post-only clamp below prevents crossing the ask.
+    let mut bid_price = best_bid0 + tick;
 
     // Our "ask" on token0: BUY the complement token1 at (1 - ask_price_on_token0)
     // This is economically equivalent to selling token0 at ask_price.
@@ -254,6 +296,7 @@ fn evaluate_binary_reward(
     if !mid.is_zero() && inventory_cap_notional > Decimal::ZERO {
         size = size.min(inventory_cap_notional / mid);
     }
+    size = size.trunc_with_scale(2); // truncate to lot size before min check
     if size < market.min_order_size {
         debug!(market = %market.question, size = %size, min = %market.min_order_size, "reward: size below min");
         return None;
@@ -309,7 +352,7 @@ fn evaluate_single_buy_reward(
     token: &crate::market::discovery::TokenInfo,
     books: &BookStore,
     risk: &RiskEngine,
-) -> Option<(OrderIntent, OrderIntent)> {
+) -> Option<OrderIntent> {
     let book = books.get(&token.token_id)?;
     let best_bid = book.bids.best()?.price;
     let best_ask = book.asks.best()?.price;
@@ -319,7 +362,7 @@ fn evaluate_single_buy_reward(
     }
 
     let tick = market.min_tick_size;
-    let mut bid_price = best_bid;
+    let mut bid_price = best_bid + tick; // improve by 1 tick for reward priority
 
     if let Some(max_spread) = market.rewards_max_spread {
         let mid = (best_bid + best_ask) / Decimal::TWO;
@@ -345,6 +388,7 @@ fn evaluate_single_buy_reward(
     if !mid.is_zero() && inventory_cap_notional > Decimal::ZERO {
         size = size.min(inventory_cap_notional / mid);
     }
+    size = size.trunc_with_scale(2); // truncate to lot size before min check
     if size < market.min_order_size {
         return None;
     }
@@ -373,13 +417,12 @@ fn evaluate_single_buy_reward(
         "reward: single buy quote"
     );
 
-    // Return as a pair with the same intent duplicated (caller handles both)
-    Some((intent.clone(), intent))
+    Some(intent)
 }
 
-/// Round price to the nearest valid tick.
+/// Round price DOWN to the nearest valid tick (safe for bids).
 fn round_to_tick(price: Decimal, tick_size: Decimal) -> Decimal {
-    (price / tick_size).round() * tick_size
+    (price / tick_size).floor() * tick_size
 }
 
 #[cfg(test)]
@@ -470,6 +513,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         };
         assert!(!fill.hedge_expired(Duration::from_secs(300)));
     }
@@ -485,6 +529,7 @@ mod tests {
             filled_at: Instant::now() - Duration::from_secs(301),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         };
         assert!(fill.hedge_expired(Duration::from_secs(300)));
     }
@@ -500,6 +545,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         };
         let books = make_book_store("0.48", "0.52");
         let intent = fill.unwind_intent(&books).unwrap();
@@ -520,6 +566,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: true,
             fee_rate_bps: dec!(20),
+                unwind_attempts: 0,
         };
         let books = make_book_store("0.48", "0.52");
         let intent = fill.unwind_intent(&books).unwrap();
@@ -538,6 +585,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         };
         let books = BookStore::new();
         assert!(fill.unwind_intent(&books).is_none());
@@ -559,6 +607,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
         assert_eq!(tracker.unhedged_count(), 1);
     }
@@ -577,6 +626,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
         assert_eq!(tracker.unhedged_count(), 1);
 
@@ -590,6 +640,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
         assert_eq!(tracker.unhedged_count(), 0); // both removed
     }
@@ -607,6 +658,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
         tracker.record_fill(UnhedgedFill {
             token_id: "t2".into(),
@@ -617,6 +669,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
         assert_eq!(tracker.unhedged_count(), 2); // different conditions, not matched
     }
@@ -633,6 +686,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
         tracker.mark_hedged("t1");
         assert_eq!(tracker.unhedged_count(), 0);
@@ -652,6 +706,7 @@ mod tests {
             filled_at: Instant::now() - Duration::from_secs(1),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
         // Fresh fill (not expired)
         tracker.record_fill(UnhedgedFill {
@@ -663,6 +718,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
 
         let books = make_book_store("0.48", "0.52");
@@ -684,6 +740,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
         tracker.clear();
         assert_eq!(tracker.unhedged_count(), 0);
@@ -703,6 +760,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
 
         let blocked = tracker.unhedged_conditions();
@@ -719,6 +777,7 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                unwind_attempts: 0,
         });
         assert!(tracker.unhedged_conditions().is_empty());
     }
@@ -779,7 +838,7 @@ mod tests {
     #[test]
     fn round_to_tick_works() {
         assert_eq!(round_to_tick(dec!(0.523), dec!(0.01)), dec!(0.52));
-        assert_eq!(round_to_tick(dec!(0.526), dec!(0.01)), dec!(0.53));
+        assert_eq!(round_to_tick(dec!(0.526), dec!(0.01)), dec!(0.52)); // floor, not round
         assert_eq!(round_to_tick(dec!(0.50), dec!(0.001)), dec!(0.500));
     }
 

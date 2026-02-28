@@ -241,9 +241,9 @@ fn generate_single_buy(
     Some(intent)
 }
 
-/// Round price to the nearest valid tick.
+/// Round price DOWN to the nearest valid tick (safe for bids, prevents crossing).
 fn round_to_tick(price: Decimal, tick_size: Decimal) -> Decimal {
-    (price / tick_size).round() * tick_size
+    (price / tick_size).floor() * tick_size
 }
 
 #[cfg(test)]
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn round_to_tick_works() {
         assert_eq!(round_to_tick(dec!(0.523), dec!(0.01)), dec!(0.52));
-        assert_eq!(round_to_tick(dec!(0.526), dec!(0.01)), dec!(0.53));
+        assert_eq!(round_to_tick(dec!(0.526), dec!(0.01)), dec!(0.52));
         assert_eq!(round_to_tick(dec!(0.50), dec!(0.001)), dec!(0.500));
     }
 }

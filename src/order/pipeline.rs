@@ -3,6 +3,7 @@ use anyhow::Result;
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use tracing::{debug, warn};
 
 use crate::auth::{AuthClient, AuthContext};
@@ -48,8 +49,7 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
     // Pre-populate SDK cache with neg_risk and fee_rate_bps from discovery metadata
     // so the order builder uses correct values without extra API calls.
     client.set_neg_risk(token_id, intent.neg_risk);
-    let fee_bps_u32 = u32::try_from(intent.fee_rate_bps.mantissa())
-        .unwrap_or(0);
+    let fee_bps_u32 = intent.fee_rate_bps.to_u32().unwrap_or(0);
     client.set_fee_rate_bps(token_id, fee_bps_u32);
 
     let signable = client
@@ -122,7 +122,7 @@ pub async fn place_batch(
         };
 
         client.set_neg_risk(token_id, intent.neg_risk);
-        let fee_bps_u32 = u32::try_from(intent.fee_rate_bps.mantissa()).unwrap_or(0);
+        let fee_bps_u32 = intent.fee_rate_bps.to_u32().unwrap_or(0);
         client.set_fee_rate_bps(token_id, fee_bps_u32);
 
         let signable = match client

@@ -98,6 +98,7 @@ fn process_fill(
                 filled_at: std::time::Instant::now(),
                 neg_risk: intent.neg_risk,
                 fee_rate_bps: intent.fee_rate_bps,
+                unwind_attempts: 0,
             });
         }
         return;
@@ -124,6 +125,7 @@ fn process_fill(
                 filled_at: std::time::Instant::now(),
                 neg_risk: intent.neg_risk,
                 fee_rate_bps: intent.fee_rate_bps,
+                unwind_attempts: 0,
             });
         }
     }
@@ -367,6 +369,11 @@ async fn main() -> Result<()> {
                 }
 
                 // Unwind expired single-sided fills (complement didn't fill in time)
+                // Force-remove fills that have failed 10+ unwind attempts to unblock quoting
+                let removed = hedge_tracker.remove_stale_unwinds(10);
+                if removed > 0 {
+                    warn!(count = removed, "⚠️ force-removed {removed} fills after 10 failed unwinds");
+                }
                 for unwind in hedge_tracker.expired_unwinds(&books) {
                     info!(
                         "⚠️ UNWIND {} {} @ ${} — complement didn't fill",
@@ -378,8 +385,9 @@ async fn main() -> Result<()> {
                                 hedge_tracker.mark_hedged(&unwind.token_id);
                                 info!("✅ UNWOUND {}", unwind.token_id);
                             } else {
-                                // FOK didn't fill — will retry next tick
-                                debug!(token = %unwind.token_id, "unwind FOK not filled, will retry");
+                                // FOK didn't fill — record attempt, will retry next tick
+                                let attempts = hedge_tracker.record_unwind_attempt(&unwind.token_id);
+                                debug!(token = %unwind.token_id, attempts, "unwind FOK not filled, will retry");
                             }
                             risk_engine.reset_cancel_failures();
                         }
@@ -577,9 +585,9 @@ async fn main() -> Result<()> {
                             rw_empty_quotes += 1;
                         }
                         for (mut bid, mut ask) in quotes {
-                            // Cap total pending orders to avoid exceeding available collateral
-                            // Each bid+ask pair locks ~2×size in USDC; limit to 3 pairs
-                            if reward_intents.len() >= 6 {
+                            // Dynamic collateral cap: each pair locks ~2×size×price USDC
+                            // Allow up to max_markets pairs (matching rebate MM behavior)
+                            if reward_intents.len() >= max_markets * 2 {
                                 break;
                             }
                             if !scale_intent_size(&mut bid, risk_multiplier, market.min_order_size) {
