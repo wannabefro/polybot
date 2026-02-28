@@ -66,12 +66,12 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
     let signed = client.sign(&*ctx.signer, signable).await?;
     let resp = client.post_order(signed).await?;
 
-    debug!(
+    info!(
         order_id = %resp.order_id,
         side = ?intent.side,
         price = %intent.price,
-        size = %intent.size,
-        neg_risk = intent.neg_risk,
+        size = %intent.size.trunc_with_scale(2),
+        token_id = %intent.token_id.chars().take(12).collect::<String>(),
         "order: placed"
     );
 
