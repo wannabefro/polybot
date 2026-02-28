@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use rust_decimal::Decimal;
 use tracing::info;
 
 use crate::auth::AuthContext;
@@ -22,6 +23,10 @@ pub struct PlaceResult {
     pub live_matched: bool,
     /// In live mode, the intent that was submitted (for recording fills).
     pub live_intent: Option<OrderIntent>,
+    /// Actual fill size from the CLOB (making_amount). Use instead of intent.size.
+    pub fill_size: Decimal,
+    /// Actual fill notional from the CLOB (taking_amount). Use instead of intent.price * intent.size.
+    pub fill_notional: Decimal,
 }
 
 /// Unified order routing — paper or live.
@@ -52,6 +57,8 @@ impl OrderRouter {
                     paper_fill,
                     live_matched: false,
                     live_intent: None,
+                    fill_size: Decimal::ZERO,
+                    fill_notional: Decimal::ZERO,
                 })
             }
             Self::Live(ctx) => {
@@ -61,6 +68,8 @@ impl OrderRouter {
                     paper_fill: None,
                     live_matched: result.matched,
                     live_intent: Some(intent.clone()),
+                    fill_size: result.making_amount,
+                    fill_notional: result.taking_amount,
                 })
             }
         }

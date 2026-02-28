@@ -91,16 +91,19 @@ fn process_fill(
 
     // Live mode: CLOB reported a match (e.g. FOK/IOC filled)
     if result.live_matched {
-        let notional = intent.price * intent.size;
-        risk_engine.record_fill(condition_id, &intent.token_id, intent.side, intent.size, notional);
+        // Use actual fill amounts from CLOB, not intent amounts
+        let size = if result.fill_size > Decimal::ZERO { result.fill_size } else { intent.size };
+        let notional = if result.fill_notional > Decimal::ZERO { result.fill_notional } else { intent.price * intent.size };
+        risk_engine.record_fill(condition_id, &intent.token_id, intent.side, size, notional);
         metrics.inc_fills();
 
         if needs_hedge {
+            let price = if !size.is_zero() { notional / size } else { intent.price };
             hedge_tracker.record_fill(UnhedgedFill {
                 token_id: intent.token_id.clone(),
                 side: intent.side,
-                price: intent.price,
-                size: intent.size,
+                price,
+                size,
                 filled_at: std::time::Instant::now(),
                 neg_risk: intent.neg_risk,
                 fee_rate_bps: intent.fee_rate_bps,
@@ -127,6 +130,9 @@ async fn main() -> Result<()> {
         .init();
 
     info!("polybot starting");
+
+    // Load .env / .env.local if present (before config reads env vars)
+    dotenvy::dotenv().ok();
 
     // ── Phase 1: Config + compliance gate ──────────────────────
     let cfg = config::Config::from_env()?;
@@ -539,6 +545,8 @@ async fn main() -> Result<()> {
                             paper_fill: Some(fill),
                             live_matched: false,
                             live_intent: None,
+                            fill_size: Decimal::ZERO,
+                            fill_notional: Decimal::ZERO,
                         };
                         process_fill(
                             &result,
