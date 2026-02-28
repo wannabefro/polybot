@@ -48,15 +48,80 @@ pub fn generate_quotes(
 
     let half_spread = (spread / dec!(2)).max(min_spread);
 
-    // Inventory skew: if we're long, lower our bid (less eager to buy more)
-    // This is a simple placeholder; production would use actual position data
-    let skew = Decimal::ZERO;
+    // Inventory skew: shift quotes away from concentrated side
+    // Positive inventory (long) → negative skew (lower bid/ask to reduce longs)
+    // Negative inventory (short) → positive skew (raise bid/ask to reduce shorts)
+    let inventory = risk.token_inventory(&token.token_id);
+    let skew = if !inventory.is_zero() {
+        let skew_factor = dec!(0.001); // 10 bps per unit of inventory
+        -(inventory * skew_factor).min(half_spread / dec!(2)).max(-(half_spread / dec!(2)))
+    } else {
+        Decimal::ZERO
+    };
 
     let bid_price = round_to_tick(mid - half_spread + skew, market.min_tick_size);
     let ask_price = round_to_tick(mid + half_spread + skew, market.min_tick_size);
 
-    // Size: use min_order_size or rewards min_size, whichever is larger
-    let size = market.min_order_size.max(dec!(5)); // 5 shares minimum
+    // Size: use min_order_size, rewards min_size, or base minimum — whichever is largest
+    let rewards_min = market.rewards_min_size.unwrap_or(Decimal::ZERO);
+    let size = market.min_order_size.max(rewards_min).max(dec!(5));
+
+    // Enforce rewards max spread constraint
+    if let Some(max_spread) = market.rewards_max_spread {
+        if (ask_price - bid_price) > max_spread {
+            debug!(
+                market = %market.question,
+                spread = %(ask_price - bid_price),
+                max = %max_spread,
+                "rebate-mm: spread exceeds rewards max_spread, tightening"
+            );
+            // Tighten to fit within rewards constraint
+            let tight_half = max_spread / dec!(2);
+            let bid_price = round_to_tick(mid - tight_half + skew, market.min_tick_size);
+            let ask_price = round_to_tick(mid + tight_half + skew, market.min_tick_size);
+            if ask_price <= bid_price {
+                return None;
+            }
+            // Re-create intents with tightened prices
+            let bid_intent = OrderIntent {
+                token_id: token.token_id.clone(),
+                side: Side::Buy,
+                price: bid_price,
+                size,
+                order_type: OrderType::GTC,
+                post_only: true,
+                neg_risk: market.neg_risk,
+                fee_rate_bps: market.maker_fee_bps,
+            };
+            let ask_intent = OrderIntent {
+                token_id: token.token_id.clone(),
+                side: Side::Sell,
+                price: ask_price,
+                size,
+                order_type: OrderType::GTC,
+                post_only: true,
+                neg_risk: market.neg_risk,
+                fee_rate_bps: market.maker_fee_bps,
+            };
+            if let RiskVerdict::Rejected(reason) = risk.check(&market.condition_id, &bid_intent) {
+                debug!(market = %market.question, reason, "rebate-mm: tightened bid rejected");
+                return None;
+            }
+            if let RiskVerdict::Rejected(reason) = risk.check(&market.condition_id, &ask_intent) {
+                debug!(market = %market.question, reason, "rebate-mm: tightened ask rejected");
+                return None;
+            }
+            info!(
+                market = %market.question,
+                bid = %bid_price,
+                ask = %ask_price,
+                size = %size,
+                skew = %skew,
+                "rebate-mm: quoting (tightened)"
+            );
+            return Some((bid_intent, ask_intent));
+        }
+    }
 
     // Risk check
     let bid_intent = OrderIntent {
@@ -66,6 +131,8 @@ pub fn generate_quotes(
         size,
         order_type: OrderType::GTC,
         post_only: true,
+        neg_risk: market.neg_risk,
+        fee_rate_bps: market.maker_fee_bps,
     };
 
     let ask_intent = OrderIntent {
@@ -75,6 +142,8 @@ pub fn generate_quotes(
         size,
         order_type: OrderType::GTC,
         post_only: true,
+        neg_risk: market.neg_risk,
+        fee_rate_bps: market.maker_fee_bps,
     };
 
     // Pre-trade risk checks

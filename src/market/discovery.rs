@@ -23,6 +23,8 @@ pub struct TradableMarket {
     pub min_order_size: Decimal,
     pub maker_fee_bps: Decimal,
     pub rewards_active: bool,
+    pub rewards_max_spread: Option<Decimal>,
+    pub rewards_min_size: Option<Decimal>,
     pub volume_24h: f64,
     pub tags: Vec<String>,
 }
@@ -62,7 +64,7 @@ async fn fetch_all_markets(client: &AuthClient) -> Result<Vec<TradableMarket>> {
                 None => continue,
             };
 
-            let tokens: Vec<TokenInfo> = m
+            let mut tokens: Vec<TokenInfo> = m
                 .tokens
                 .iter()
                 .map(|t| TokenInfo {
@@ -71,6 +73,22 @@ async fn fetch_all_markets(client: &AuthClient) -> Result<Vec<TradableMarket>> {
                     price: t.price,
                 })
                 .collect();
+
+            // Exclude "Other" outcomes from neg-risk markets (catch-all bucket, not tradable)
+            if m.neg_risk {
+                tokens.retain(|t| t.outcome != "Other");
+            }
+
+            let rewards_max_spread = if m.rewards.max_spread > Decimal::ZERO {
+                Some(m.rewards.max_spread)
+            } else {
+                None
+            };
+            let rewards_min_size = if m.rewards.min_size > Decimal::ZERO {
+                Some(m.rewards.min_size)
+            } else {
+                None
+            };
 
             results.push(TradableMarket {
                 condition_id,
@@ -82,6 +100,8 @@ async fn fetch_all_markets(client: &AuthClient) -> Result<Vec<TradableMarket>> {
                 min_order_size: m.minimum_order_size,
                 maker_fee_bps: m.maker_base_fee,
                 rewards_active: m.rewards.rates.iter().any(|r| r.rewards_daily_rate > Decimal::ZERO),
+                rewards_max_spread,
+                rewards_min_size,
                 // volume_24h not available from CLOB API; enriched via Gamma API later
                 volume_24h: 0.0,
                 tags: m.tags.clone(),

@@ -118,10 +118,7 @@ pub fn spawn_recon(
 
             match fetch_remote_positions(&client).await {
                 Ok(remote) => {
-                    // Build local snapshot from risk engine
-                    // (we only have token_inventory, not condition-level)
-                    // For now, compare token-level inventory
-                    let local = HashMap::new(); // TODO: expose risk_engine inventory as HashMap
+                    let local = risk_engine.inventory_snapshot();
 
                     let mismatch = compute_mismatch(&local, &remote);
                     if mismatch > threshold {

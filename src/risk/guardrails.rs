@@ -20,7 +20,11 @@ pub enum RiskVerdict {
 /// Tracks positions and enforces risk limits.
 #[derive(Debug)]
 pub struct RiskEngine {
-    config: Config,
+    /// Pre-computed Decimal risk limits (avoids f64→Decimal on every check).
+    limit_per_market: Decimal,
+    limit_gross: Decimal,
+    limit_daily_loss: Decimal,
+    limit_inventory: Decimal,
     /// Per-market notional exposure (condition_id → USDC notional).
     market_exposure: RwLock<HashMap<String, Decimal>>,
     /// Per-token directional exposure (token_id → signed size: +buy, -sell).
@@ -33,12 +37,29 @@ pub struct RiskEngine {
     cancel_failures: AtomicU32,
 }
 
+/// Safely convert f64 NAV limit to Decimal. Panics on NaN/Inf at startup
+/// rather than silently bypassing limits at runtime.
+fn safe_nav_decimal(nav: f64, fraction: f64, label: &str) -> Decimal {
+    let val = nav * fraction;
+    assert!(val.is_finite(), "risk limit {label} produced non-finite value: nav={nav}, fraction={fraction}");
+    Decimal::from_f64_retain(val)
+        .unwrap_or_else(|| panic!("risk limit {label} failed Decimal conversion: {val}"))
+}
+
 const CANCEL_FAILURE_HALT_THRESHOLD: u32 = 3;
 
 impl RiskEngine {
     pub fn new(config: Config) -> Arc<Self> {
+        let limit_per_market = safe_nav_decimal(config.nav_usdc, config.max_notional_per_market, "per_market");
+        let limit_gross = safe_nav_decimal(config.nav_usdc, config.max_gross_exposure, "gross");
+        let limit_daily_loss = safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "daily_loss");
+        let limit_inventory = safe_nav_decimal(config.nav_usdc, config.max_one_sided_inventory, "inventory");
+
         Arc::new(Self {
-            config,
+            limit_per_market,
+            limit_gross,
+            limit_daily_loss,
+            limit_inventory,
             market_exposure: RwLock::new(HashMap::new()),
             token_inventory: RwLock::new(HashMap::new()),
             daily_pnl: RwLock::new(Decimal::ZERO),
@@ -56,39 +77,35 @@ impl RiskEngine {
         let notional = intent.price * intent.size;
 
         // 1. Per-market notional cap (2% NAV default)
-        let max_per_market = self.config.nav_limit(self.config.max_notional_per_market);
         let current = self
             .market_exposure
             .read()
             .get(condition_id)
             .copied()
             .unwrap_or(Decimal::ZERO);
-        if current + notional > Decimal::from_f64_retain(max_per_market).unwrap_or(Decimal::MAX) {
+        if current + notional > self.limit_per_market {
             return RiskVerdict::Rejected(format!(
-                "per-market limit: {current} + {notional} > {max_per_market}"
+                "per-market limit: {current} + {notional} > {}", self.limit_per_market
             ));
         }
 
         // 2. Gross exposure cap (25% NAV default)
-        let max_gross = self.config.nav_limit(self.config.max_gross_exposure);
         let gross: Decimal = self.market_exposure.read().values().sum();
-        if gross + notional > Decimal::from_f64_retain(max_gross).unwrap_or(Decimal::MAX) {
+        if gross + notional > self.limit_gross {
             return RiskVerdict::Rejected(format!(
-                "gross exposure limit: {gross} + {notional} > {max_gross}"
+                "gross exposure limit: {gross} + {notional} > {}", self.limit_gross
             ));
         }
 
         // 3. Daily loss stop (3% NAV default)
-        let max_loss = self.config.nav_limit(self.config.daily_loss_stop);
         let pnl = *self.daily_pnl.read();
-        if pnl < Decimal::from_f64_retain(-max_loss).unwrap_or(Decimal::MIN) {
-            return RiskVerdict::Rejected(format!("daily loss stop: P&L {pnl} < -{max_loss}"));
+        if pnl < -self.limit_daily_loss {
+            return RiskVerdict::Rejected(format!(
+                "daily loss stop: P&L {pnl} < -{}", self.limit_daily_loss
+            ));
         }
 
         // 4. One-sided inventory cap (1% NAV default)
-        let max_inventory =
-            Decimal::from_f64_retain(self.config.nav_limit(self.config.max_one_sided_inventory))
-                .unwrap_or(Decimal::MAX);
         let current_inv = self
             .token_inventory
             .read()
@@ -101,11 +118,10 @@ impl RiskEngine {
             _ => Decimal::ZERO,
         };
         let new_inv = current_inv + delta;
-        // Check absolute value of new inventory * mid price ≈ notional
         let inv_notional = new_inv.abs() * intent.price;
-        if inv_notional > max_inventory {
+        if inv_notional > self.limit_inventory {
             return RiskVerdict::Rejected(format!(
-                "one-sided inventory: {inv_notional} > {max_inventory}"
+                "one-sided inventory: {inv_notional} > {}", self.limit_inventory
             ));
         }
 
@@ -191,6 +207,11 @@ impl RiskEngine {
             .copied()
             .unwrap_or(Decimal::ZERO)
     }
+
+    /// Snapshot of all token inventory (for position reconciliation).
+    pub fn inventory_snapshot(&self) -> HashMap<String, Decimal> {
+        self.token_inventory.read().clone()
+    }
 }
 
 #[cfg(test)]
@@ -207,6 +228,8 @@ mod tests {
             size: Decimal::from_f64_retain(size).unwrap(),
             order_type: OrderType::GTC,
             post_only: true,
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         }
     }
 
@@ -218,6 +241,8 @@ mod tests {
             size: Decimal::from_f64_retain(size).unwrap(),
             order_type: OrderType::GTC,
             post_only: true,
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         }
     }
 
@@ -336,6 +361,8 @@ mod tests {
             size: Decimal::from(10),
             order_type: OrderType::GTC,
             post_only: true,
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         };
         let verdict = engine.check("cond1", &intent);
         assert!(matches!(verdict, RiskVerdict::Rejected(_)));
@@ -409,5 +436,59 @@ mod tests {
         engine.record_cancel_failure();
         engine.reset_daily();
         assert!(!engine.is_halted());
+    }
+
+    // ── Phase 4 bug-fix tests ──
+
+    #[test]
+    fn inventory_snapshot_returns_all_tokens() {
+        let engine = RiskEngine::new(test_config());
+        engine.record_fill("cond1", "token_a", Side::Buy, Decimal::from(50), Decimal::from(25));
+        engine.record_fill("cond1", "token_b", Side::Sell, Decimal::from(30), Decimal::from(15));
+
+        let snapshot = engine.inventory_snapshot();
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(*snapshot.get("token_a").unwrap(), Decimal::from(50));
+        assert_eq!(*snapshot.get("token_b").unwrap(), Decimal::from(-30));
+    }
+
+    #[test]
+    fn inventory_snapshot_empty_initially() {
+        let engine = RiskEngine::new(test_config());
+        let snapshot = engine.inventory_snapshot();
+        assert!(snapshot.is_empty());
+    }
+
+    #[test]
+    fn safe_nav_decimal_panics_on_nan() {
+        let result = std::panic::catch_unwind(|| {
+            safe_nav_decimal(f64::NAN, 0.02, "test");
+        });
+        assert!(result.is_err(), "NaN should panic");
+    }
+
+    #[test]
+    fn safe_nav_decimal_panics_on_inf() {
+        let result = std::panic::catch_unwind(|| {
+            safe_nav_decimal(f64::INFINITY, 0.02, "test");
+        });
+        assert!(result.is_err(), "Infinity should panic");
+    }
+
+    #[test]
+    fn safe_nav_decimal_valid_value() {
+        let val = safe_nav_decimal(10000.0, 0.02, "test");
+        assert!(val > Decimal::ZERO);
+        assert_eq!(val, Decimal::from_f64_retain(200.0).unwrap());
+    }
+
+    #[test]
+    fn pre_computed_limits_match_config() {
+        let config = test_config();
+        let engine = RiskEngine::new(config.clone());
+        assert_eq!(engine.limit_per_market, safe_nav_decimal(config.nav_usdc, config.max_notional_per_market, "pm"));
+        assert_eq!(engine.limit_gross, safe_nav_decimal(config.nav_usdc, config.max_gross_exposure, "ge"));
+        assert_eq!(engine.limit_daily_loss, safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "dl"));
+        assert_eq!(engine.limit_inventory, safe_nav_decimal(config.nav_usdc, config.max_one_sided_inventory, "inv"));
     }
 }

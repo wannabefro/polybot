@@ -58,6 +58,8 @@ impl UnhedgedFill {
             size: self.size,
             order_type: OrderType::FOK, // fill-or-kill for hedges
             post_only: false,
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         })
     }
 }
@@ -162,6 +164,8 @@ pub fn evaluate_reward_quote(
         size,
         order_type: OrderType::GTC,
         post_only: true,
+        neg_risk: market.neg_risk,
+        fee_rate_bps: market.maker_fee_bps,
     };
 
     let ask_intent = OrderIntent {
@@ -171,6 +175,8 @@ pub fn evaluate_reward_quote(
         size,
         order_type: OrderType::GTC,
         post_only: true,
+        neg_risk: market.neg_risk,
+        fee_rate_bps: market.maker_fee_bps,
     };
 
     // Risk checks
@@ -224,6 +230,8 @@ mod tests {
             min_order_size: dec!(5),
             maker_fee_bps: dec!(0),
             rewards_active,
+            rewards_max_spread: None,
+            rewards_min_size: None,
             volume_24h: 50_000.0,
             tags: vec![],
         }

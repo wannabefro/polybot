@@ -41,14 +41,7 @@ impl OrderRouter {
     pub async fn place(&self, intent: &OrderIntent, books: &BookStore) -> Result<PlaceResult> {
         match self {
             Self::Paper(engine) => {
-                let fills_before = engine.fills().len();
-                let id = engine.place_order(intent, books);
-                let fills_after = engine.fills();
-                let paper_fill = if fills_after.len() > fills_before {
-                    fills_after.last().cloned()
-                } else {
-                    None
-                };
+                let (id, paper_fill) = engine.place_order(intent, books);
                 Ok(PlaceResult {
                     order_id: id,
                     paper_fill,
@@ -135,6 +128,8 @@ mod tests {
             size: dec!(10),
             order_type: OrderType::GTC,
             post_only: true,
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         }
     }
 
@@ -184,6 +179,8 @@ mod tests {
             size: dec!(10),
             order_type: OrderType::GTC,
             post_only: false,
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         };
         let result = router.place(&crossing_intent, &books).await.unwrap();
         assert!(result.paper_fill.is_some(), "crossing order should fill immediately");

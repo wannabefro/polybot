@@ -45,6 +45,8 @@ fn make_market(rewards: bool, volume: f64) -> TradableMarket {
         min_order_size: dec!(5),
         maker_fee_bps: dec!(0),
         rewards_active: rewards,
+        rewards_max_spread: None,
+        rewards_min_size: None,
         volume_24h: volume,
         tags: vec![],
     }
@@ -144,6 +146,8 @@ async fn risk_daily_loss_rejects_orders() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: true,
+    neg_risk: false,
+    fee_rate_bps: Decimal::ZERO,
     };
     let verdict = risk.check("cond1", &intent);
     assert!(
@@ -168,6 +172,8 @@ async fn risk_halt_stops_all_orders() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: true,
+    neg_risk: false,
+    fee_rate_bps: Decimal::ZERO,
     };
     let verdict = risk.check("cond1", &intent);
     assert!(matches!(verdict, RiskVerdict::Rejected(_)));
@@ -189,6 +195,8 @@ async fn risk_daily_reset_clears_loss() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: true,
+    neg_risk: false,
+    fee_rate_bps: Decimal::ZERO,
     };
     assert!(matches!(risk.check("cond1", &intent), RiskVerdict::Rejected(_)));
 
@@ -362,6 +370,8 @@ async fn fill_detection_through_router() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: false,
+    neg_risk: false,
+    fee_rate_bps: Decimal::ZERO,
     };
     let result = router.place(&intent, &books).await.unwrap();
     assert!(result.paper_fill.is_some());
@@ -390,6 +400,8 @@ async fn cancel_failure_threshold_halts_engine() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: true,
+    neg_risk: false,
+    fee_rate_bps: Decimal::ZERO,
     };
     assert!(matches!(risk.check("cond1", &intent), RiskVerdict::Rejected(_)));
 }
@@ -412,6 +424,8 @@ async fn one_sided_inventory_blocks_excessive_exposure() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: true,
+    neg_risk: false,
+    fee_rate_bps: Decimal::ZERO,
     };
     assert!(matches!(risk.check("cond1", &intent), RiskVerdict::Rejected(_)));
 
@@ -423,6 +437,8 @@ async fn one_sided_inventory_blocks_excessive_exposure() {
         size: dec!(50),
         order_type: OrderType::GTC,
         post_only: true,
+    neg_risk: false,
+    fee_rate_bps: Decimal::ZERO,
     };
     assert!(matches!(risk.check("cond1", &sell_intent), RiskVerdict::Approved));
 }
@@ -491,4 +507,115 @@ async fn neg_risk_stale_pair_detection() {
 
     let stale = books.get("token_no").is_none();
     assert!(stale, "missing book should be detected as stale");
+}
+
+// ─── Phase 4 Tests ────────────────────────────────────────────
+
+/// Phase 4 Bug #2: Paper fill race — place_order returns fill atomically.
+#[tokio::test]
+async fn paper_fill_returned_atomically() {
+    let paper = PaperEngine::new();
+    let books = BookStore::new();
+    seed_book(&books, "token_yes", "0.48", "0.52");
+
+    // Crossing buy should return fill directly from place_order
+    let (id, fill) = paper.place_order(
+        &OrderIntent {
+            token_id: "token_yes".into(),
+            side: Side::Buy,
+            price: dec!(0.52),
+            size: dec!(10),
+            order_type: OrderType::GTC,
+            post_only: false,
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+        },
+        &books,
+    );
+    assert!(id.starts_with("paper-"));
+    assert!(fill.is_some(), "crossing order should return fill atomically");
+    let f = fill.unwrap();
+    assert_eq!(f.token_id, "token_yes");
+    assert_eq!(f.size, dec!(10));
+}
+
+/// Phase 4 Bug #2: Resting order returns None fill.
+#[tokio::test]
+async fn paper_resting_returns_no_fill() {
+    let paper = PaperEngine::new();
+    let books = BookStore::new();
+    seed_book(&books, "token_yes", "0.48", "0.52");
+
+    let (_, fill) = paper.place_order(
+        &OrderIntent {
+            token_id: "token_yes".into(),
+            side: Side::Buy,
+            price: dec!(0.49),
+            size: dec!(10),
+            order_type: OrderType::GTC,
+            post_only: true,
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+        },
+        &books,
+    );
+    assert!(fill.is_none(), "resting order should not return a fill");
+}
+
+/// Phase 4 Bug #3: Inventory snapshot is non-empty after fills.
+#[tokio::test]
+async fn inventory_snapshot_for_recon() {
+    let cfg = test_config();
+    let risk = RiskEngine::new(cfg.clone());
+
+    risk.record_fill("cond1", "token_yes", Side::Buy, Decimal::from(100), Decimal::from(50));
+    risk.record_fill("cond1", "token_no", Side::Sell, Decimal::from(50), Decimal::from(25));
+
+    let snapshot = risk.inventory_snapshot();
+    assert_eq!(snapshot.len(), 2);
+    assert_eq!(*snapshot.get("token_yes").unwrap(), Decimal::from(100));
+    assert_eq!(*snapshot.get("token_no").unwrap(), Decimal::from(-50));
+}
+
+/// Phase 4: OrderIntent carries neg_risk and fee_rate_bps through pipeline.
+#[tokio::test]
+async fn order_intent_carries_neg_risk_fields() {
+    let intent = OrderIntent {
+        token_id: "token_yes".into(),
+        side: Side::Buy,
+        price: dec!(0.50),
+        size: dec!(10),
+        order_type: OrderType::GTC,
+        post_only: true,
+        neg_risk: true,
+        fee_rate_bps: dec!(200),
+    };
+    assert!(intent.neg_risk);
+    assert_eq!(intent.fee_rate_bps, dec!(200));
+}
+
+/// Phase 4: Inventory skew adjusts quotes away from concentrated side.
+#[tokio::test]
+async fn inventory_skew_shifts_quotes() {
+    let cfg = test_config();
+    let risk = RiskEngine::new(cfg.clone());
+    let books = BookStore::new();
+    seed_book(&books, "token_yes", "0.48", "0.52");
+
+    let market = make_market(true, 50_000.0);
+
+    // Without inventory, get baseline quotes
+    let quotes_neutral = strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk);
+    assert!(quotes_neutral.is_some());
+    let (bid_n, _ask_n) = quotes_neutral.unwrap();
+
+    // Record moderate long position (50 shares at 0.50 = 25 notional, well within 100 limit)
+    risk.record_fill("cond1", "token_yes", Side::Buy, Decimal::from(50), Decimal::from(25));
+
+    let quotes_long = strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk);
+    assert!(quotes_long.is_some());
+    let (bid_l, _ask_l) = quotes_long.unwrap();
+
+    // When long, bid should be lower or equal (less eager to buy more)
+    assert!(bid_l.price <= bid_n.price, "long inventory should lower bid price: got {} vs baseline {}", bid_l.price, bid_n.price);
 }

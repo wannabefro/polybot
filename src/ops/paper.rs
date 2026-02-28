@@ -36,7 +36,7 @@ impl PaperEngine {
         })
     }
 
-    /// Simulate placing an order. Returns a paper order ID.
+    /// Simulate placing an order. Returns (order_id, optional_fill).
     ///
     /// If the book has a matching price level, we simulate an immediate fill.
     /// Otherwise, the order rests as an open order.
@@ -44,7 +44,7 @@ impl PaperEngine {
         &self,
         intent: &OrderIntent,
         books: &BookStore,
-    ) -> String {
+    ) -> (String, Option<PaperFill>) {
         let mut id_guard = self.next_id.write();
         let order_id = format!("paper-{}", *id_guard);
         *id_guard += 1;
@@ -83,7 +83,8 @@ impl PaperEngine {
                 size = %fill.size,
                 "paper: filled"
             );
-            self.fills.write().push(fill);
+            self.fills.write().push(fill.clone());
+            (order_id, Some(fill))
         } else {
             info!(
                 id = %order_id,
@@ -94,9 +95,8 @@ impl PaperEngine {
                 "paper: order resting"
             );
             self.open_orders.write().insert(order_id.clone(), intent.clone());
+            (order_id, None)
         }
-
-        order_id
     }
 
     /// Cancel a paper order.
@@ -175,6 +175,8 @@ mod tests {
             size: dec!(10),
             order_type: OrderType::GTC,
             post_only,
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
         }
     }
 
@@ -183,8 +185,9 @@ mod tests {
         let engine = PaperEngine::new();
         let books = make_book(dec!(0.48), dec!(0.52));
 
-        let id = engine.place_order(&intent(Side::Buy, dec!(0.49), false), &books);
+        let (id, fill) = engine.place_order(&intent(Side::Buy, dec!(0.49), false), &books);
         assert!(id.starts_with("paper-"));
+        assert!(fill.is_none());
         assert_eq!(engine.open_order_count(), 1);
         assert_eq!(engine.fills().len(), 0);
     }
@@ -194,10 +197,11 @@ mod tests {
         let engine = PaperEngine::new();
         let books = make_book(dec!(0.48), dec!(0.52));
 
-        let _id = engine.place_order(&intent(Side::Buy, dec!(0.52), false), &books);
+        let (_id, fill) = engine.place_order(&intent(Side::Buy, dec!(0.52), false), &books);
+        assert!(fill.is_some());
+        assert_eq!(fill.unwrap().price, dec!(0.52));
         assert_eq!(engine.fills().len(), 1);
         assert_eq!(engine.open_order_count(), 0);
-        assert_eq!(engine.fills()[0].price, dec!(0.52));
     }
 
     #[test]
@@ -205,7 +209,8 @@ mod tests {
         let engine = PaperEngine::new();
         let books = make_book(dec!(0.48), dec!(0.52));
 
-        let _id = engine.place_order(&intent(Side::Buy, dec!(0.52), true), &books);
+        let (_id, fill) = engine.place_order(&intent(Side::Buy, dec!(0.52), true), &books);
+        assert!(fill.is_none());
         assert_eq!(engine.fills().len(), 0);
         assert_eq!(engine.open_order_count(), 1);
     }
@@ -215,7 +220,7 @@ mod tests {
         let engine = PaperEngine::new();
         let books = make_book(dec!(0.48), dec!(0.52));
 
-        let id = engine.place_order(&intent(Side::Buy, dec!(0.49), false), &books);
+        let (id, _) = engine.place_order(&intent(Side::Buy, dec!(0.49), false), &books);
         assert_eq!(engine.open_order_count(), 1);
 
         assert!(engine.cancel_order(&id));
@@ -243,8 +248,8 @@ mod tests {
         let engine = PaperEngine::new();
         let books = make_book(dec!(0.48), dec!(0.52));
 
-        let id1 = engine.place_order(&intent(Side::Buy, dec!(0.47), false), &books);
-        let id2 = engine.place_order(&intent(Side::Buy, dec!(0.46), false), &books);
+        let (id1, _) = engine.place_order(&intent(Side::Buy, dec!(0.47), false), &books);
+        let (id2, _) = engine.place_order(&intent(Side::Buy, dec!(0.46), false), &books);
         assert_eq!(id1, "paper-1");
         assert_eq!(id2, "paper-2");
     }
@@ -266,9 +271,9 @@ mod tests {
         let engine = PaperEngine::new();
         let books = make_book(dec!(0.48), dec!(0.52));
 
-        engine.place_order(&intent(Side::Sell, dec!(0.48), false), &books);
-        assert_eq!(engine.fills().len(), 1);
-        assert_eq!(engine.fills()[0].side, "Sell");
+        let (_, fill) = engine.place_order(&intent(Side::Sell, dec!(0.48), false), &books);
+        assert!(fill.is_some());
+        assert_eq!(fill.unwrap().side, "Sell");
     }
 
     #[test]
@@ -276,7 +281,8 @@ mod tests {
         let engine = PaperEngine::new();
         let books = BookStore::new();
 
-        engine.place_order(&intent(Side::Buy, dec!(0.52), false), &books);
+        let (_, fill) = engine.place_order(&intent(Side::Buy, dec!(0.52), false), &books);
+        assert!(fill.is_none());
         assert_eq!(engine.open_order_count(), 1);
         assert_eq!(engine.fills().len(), 0);
     }

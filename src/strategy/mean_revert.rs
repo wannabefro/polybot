@@ -164,6 +164,8 @@ impl MeanRevertState {
                     size: pos.size,
                     order_type: OrderType::FOK,
                     post_only: false,
+                    neg_risk: false,
+                    fee_rate_bps: Decimal::ZERO,
                 });
             }
         }
@@ -254,6 +256,8 @@ pub fn evaluate_entry(
         size,
         order_type: OrderType::GTC,
         post_only: false,
+        neg_risk: market.neg_risk,
+        fee_rate_bps: market.maker_fee_bps,
     };
 
     // Risk check
@@ -302,6 +306,8 @@ mod tests {
             min_order_size: dec!(1),
             maker_fee_bps: dec!(0),
             rewards_active: false,
+            rewards_max_spread: None,
+            rewards_min_size: None,
             volume_24h: volume,
             tags: vec![],
         }
