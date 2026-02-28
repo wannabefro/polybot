@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 const DEFAULT_USDC_CONTRACT: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
 /// Default public Polygon RPC.
-const DEFAULT_POLYGON_RPC: &str = "https://polygon-rpc.com";
+const DEFAULT_POLYGON_RPC: &str = "https://polygon-bor-rpc.publicnode.com";
 
 /// balanceOf(address) selector.
 const BALANCE_OF_SELECTOR: &str = "70a08231";
