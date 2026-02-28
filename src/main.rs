@@ -184,14 +184,11 @@ async fn main() -> Result<()> {
     }
 
     // ── Phase 6: Live NAV tracker ──────────────────────────────
-    let wallet_address = format!("{:#x}", auth_ctx.signer.address());
     let (_nav_handle, mut nav_rx) = ops::nav::spawn(
-        wallet_address,
+        auth_ctx.client.clone(),
         cfg.nav_usdc,
         cfg.paper_mode,
         cfg.position_recon_interval, // reuse recon interval for NAV polls
-        ops::nav::polygon_rpc_from_env(),
-        ops::nav::usdc_contract_from_env(),
     );
 
     // Strategy state
