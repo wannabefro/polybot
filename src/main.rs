@@ -493,6 +493,8 @@ async fn main() -> Result<()> {
                 if reward_enabled {
                     let mut reward_intents: Vec<(crate::order::pipeline::OrderIntent, String, bool, String)> = Vec::new();
                     let mut rw_count = 0usize;
+                    let mut rw_empty_quotes = 0usize;
+                    let rw_total_rewards_markets = universe.iter().filter(|m| m.rewards_active).count();
                     for market in universe.iter().filter(|m| m.rewards_active) {
                         if rw_count >= max_markets {
                             break;
@@ -508,6 +510,9 @@ async fn main() -> Result<()> {
                             &cfg, market, &books, &risk_engine,
                         );
                         rw_count += 1;
+                        if quotes.is_empty() {
+                            rw_empty_quotes += 1;
+                        }
                         for (mut bid, mut ask) in quotes {
                             if !scale_intent_size(&mut bid, risk_multiplier, market.min_order_size) {
                                 continue;
@@ -527,6 +532,14 @@ async fn main() -> Result<()> {
                             reward_intents.push((bid, market.condition_id.clone(), true, bid_key));
                             reward_intents.push((ask, market.condition_id.clone(), true, ask_key));
                         }
+                    }
+                    if reward_intents.is_empty() {
+                        info!(
+                            rewards_markets_total = rw_total_rewards_markets,
+                            with_books = rw_count,
+                            empty_quotes = rw_empty_quotes,
+                            "reward: no quotable intents"
+                        );
                     }
                     let results: Vec<_> = futures::future::join_all(
                         reward_intents.iter().map(|(intent, _, _, _)| router.place(intent, &books))
