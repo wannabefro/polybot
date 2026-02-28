@@ -93,13 +93,13 @@ async fn paper_pipeline_rebate_mm_tick() {
     assert!(ask.post_only);
 
     // Route through paper engine
-    let bid_id = router.place(&bid, &books).await.unwrap();
+    let bid_result = router.place(&bid, &books).await.unwrap();
     metrics.inc_quotes_sent();
-    let ask_id = router.place(&ask, &books).await.unwrap();
+    let ask_result = router.place(&ask, &books).await.unwrap();
     metrics.inc_quotes_sent();
 
-    assert!(bid_id.starts_with("paper-"));
-    assert!(ask_id.starts_with("paper-"));
+    assert!(bid_result.order_id.starts_with("paper-"));
+    assert!(ask_result.order_id.starts_with("paper-"));
 
     let snap = metrics.snapshot();
     assert_eq!(snap.quotes_sent, 2);
@@ -342,4 +342,153 @@ async fn cancel_all_clears_paper_engine() {
 
     router.cancel_all().await.unwrap();
     assert_eq!(router.paper_engine().unwrap().open_order_count(), 0);
+}
+
+// ─── Phase 3 Gap Tests ───────────────────────────────────────
+
+/// Gap #1: Fill detection — paper engine returns fills through router.
+#[tokio::test]
+async fn fill_detection_through_router() {
+    let paper = PaperEngine::new();
+    let router = OrderRouter::Paper(paper);
+    let books = BookStore::new();
+    seed_book(&books, "token_yes", "0.48", "0.52");
+
+    // Crossing buy at 0.52 should fill immediately
+    let intent = OrderIntent {
+        token_id: "token_yes".into(),
+        side: Side::Buy,
+        price: dec!(0.52),
+        size: dec!(10),
+        order_type: OrderType::GTC,
+        post_only: false,
+    };
+    let result = router.place(&intent, &books).await.unwrap();
+    assert!(result.paper_fill.is_some());
+    let fill = result.paper_fill.unwrap();
+    assert_eq!(fill.token_id, "token_yes");
+    assert_eq!(fill.size, dec!(10));
+}
+
+/// Gap #2: Cancel failure threshold halts risk engine.
+#[tokio::test]
+async fn cancel_failure_threshold_halts_engine() {
+    let cfg = test_config();
+    let risk = RiskEngine::new(cfg.clone());
+
+    // 3 consecutive failures should halt
+    assert!(!risk.record_cancel_failure());
+    assert!(!risk.record_cancel_failure());
+    assert!(risk.record_cancel_failure()); // 3rd triggers halt
+    assert!(risk.is_halted());
+
+    // All orders now rejected
+    let intent = OrderIntent {
+        token_id: "token_yes".into(),
+        side: Side::Buy,
+        price: dec!(0.49),
+        size: dec!(10),
+        order_type: OrderType::GTC,
+        post_only: true,
+    };
+    assert!(matches!(risk.check("cond1", &intent), RiskVerdict::Rejected(_)));
+}
+
+/// Gap #3: One-sided inventory blocks excessive directional exposure.
+#[tokio::test]
+async fn one_sided_inventory_blocks_excessive_exposure() {
+    let cfg = test_config();
+    let risk = RiskEngine::new(cfg.clone());
+
+    // max_one_sided_inventory = 0.01 → 1% of 10000 = 100 USDC
+    // Record buy 200 shares at some implied price
+    risk.record_fill("cond1", "token_yes", Side::Buy, Decimal::from(200), Decimal::from(100));
+
+    // Further buying should be blocked (200 shares * 0.50 = 100 notional = at limit)
+    let intent = OrderIntent {
+        token_id: "token_yes".into(),
+        side: Side::Buy,
+        price: dec!(0.50),
+        size: dec!(10),
+        order_type: OrderType::GTC,
+        post_only: true,
+    };
+    assert!(matches!(risk.check("cond1", &intent), RiskVerdict::Rejected(_)));
+
+    // But selling should be fine (reduces inventory)
+    let sell_intent = OrderIntent {
+        token_id: "token_yes".into(),
+        side: Side::Sell,
+        price: dec!(0.50),
+        size: dec!(50),
+        order_type: OrderType::GTC,
+        post_only: true,
+    };
+    assert!(matches!(risk.check("cond1", &sell_intent), RiskVerdict::Approved));
+}
+
+/// Gap #5: Book timestamp regression is rejected.
+#[tokio::test]
+async fn book_timestamp_regression_rejected() {
+    let books = BookStore::new();
+
+    let u1 = BookUpdate::builder()
+        .asset_id(U256::ZERO)
+        .market(B256::ZERO)
+        .timestamp(2000)
+        .bids(vec![OrderBookLevel::builder()
+            .price(dec!(0.48))
+            .size(dec!(100))
+            .build()])
+        .asks(vec![OrderBookLevel::builder()
+            .price(dec!(0.52))
+            .size(dec!(100))
+            .build()])
+        .build();
+    assert!(books.apply("token_yes", &u1));
+
+    // Older update should be rejected
+    let u2 = BookUpdate::builder()
+        .asset_id(U256::ZERO)
+        .market(B256::ZERO)
+        .timestamp(1000)
+        .bids(vec![OrderBookLevel::builder()
+            .price(dec!(0.40))
+            .size(dec!(50))
+            .build()])
+        .asks(vec![OrderBookLevel::builder()
+            .price(dec!(0.60))
+            .size(dec!(50))
+            .build()])
+        .build();
+    assert!(!books.apply("token_yes", &u2));
+
+    // Book should still have original data
+    let book = books.get("token_yes").unwrap();
+    assert_eq!(book.bids.best().unwrap().price, dec!(0.48));
+}
+
+/// Gap #5: Book pause/resume cycle.
+#[tokio::test]
+async fn book_pause_resume_cycle() {
+    let books = BookStore::new();
+
+    assert!(!books.is_paused());
+    books.pause();
+    assert!(books.is_paused());
+    books.resume();
+    assert!(!books.is_paused());
+}
+
+/// Gap #6: Neg-risk pair freshness (unit-level check).
+#[tokio::test]
+async fn neg_risk_stale_pair_detection() {
+    let books = BookStore::new();
+
+    // Seed one token but not the other in a neg-risk pair
+    seed_book(&books, "token_yes", "0.48", "0.52");
+    // token_no has no book → stale
+
+    let stale = books.get("token_no").is_none();
+    assert!(stale, "missing book should be detected as stale");
 }

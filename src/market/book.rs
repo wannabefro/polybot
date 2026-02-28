@@ -1,11 +1,12 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::RwLock;
 use polymarket_client_sdk::clob::ws::types::response::BookUpdate;
 use rust_decimal::Decimal;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// A single price level.
 #[derive(Debug, Clone)]
@@ -59,17 +60,35 @@ impl LocalBook {
 #[derive(Debug, Clone)]
 pub struct BookStore {
     inner: Arc<RwLock<HashMap<String, LocalBook>>>,
+    /// Pause flag: set on WS reconnect, cleared after successful resync.
+    paused: Arc<AtomicBool>,
 }
 
 impl BookStore {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
+            paused: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Apply a BookUpdate from the WebSocket feed.
-    pub fn apply(&self, asset_id: &str, update: &BookUpdate) {
+    /// Rejects timestamp regressions (stale/replayed data).
+    /// Returns false if the update was rejected.
+    pub fn apply(&self, asset_id: &str, update: &BookUpdate) -> bool {
+        // Check timestamp regression
+        if let Some(existing) = self.inner.read().get(asset_id) {
+            if update.timestamp < existing.timestamp_ms {
+                warn!(
+                    asset_id,
+                    new_ts = update.timestamp,
+                    old_ts = existing.timestamp_ms,
+                    "book: rejected timestamp regression"
+                );
+                return false;
+            }
+        }
+
         let bids = BookSide {
             levels: update
                 .bids
@@ -102,6 +121,7 @@ impl BookStore {
 
         debug!(asset_id, mid = ?book.mid_price(), "book: updated");
         self.inner.write().insert(asset_id.to_string(), book);
+        true
     }
 
     /// Get a snapshot of the book for an asset.
@@ -121,6 +141,27 @@ impl BookStore {
     /// Remove books for assets no longer in the universe.
     pub fn retain(&self, asset_ids: &[String]) {
         self.inner.write().retain(|k, _| asset_ids.contains(k));
+    }
+
+    /// Pause quoting (set on WS reconnect).
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+        warn!("book: paused — awaiting resync");
+    }
+
+    /// Resume quoting after successful resync.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+    }
+
+    /// Check if quoting is paused (e.g., during WS reconnect resync).
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Check if any tracked book has a stale feed.
+    pub fn any_stale(&self, threshold: std::time::Duration) -> bool {
+        self.inner.read().values().any(|b| b.is_stale(threshold))
     }
 }
 
@@ -274,5 +315,91 @@ mod tests {
         assert_eq!(book.asks.levels.len(), 2);
         assert_eq!(book.bids.best().unwrap().price, dec!(0.48));
         assert_eq!(book.asks.best().unwrap().price, dec!(0.52));
+    }
+
+    // ── New: timestamp regression tests ──
+
+    fn make_update_ts(
+        bids: Vec<(&str, &str)>,
+        asks: Vec<(&str, &str)>,
+        ts: i64,
+    ) -> BookUpdate {
+        BookUpdate::builder()
+            .asset_id(U256::ZERO)
+            .market(B256::ZERO)
+            .timestamp(ts)
+            .bids(bids.into_iter().map(|(p, s)| make_level(p, s)).collect())
+            .asks(asks.into_iter().map(|(p, s)| make_level(p, s)).collect())
+            .hash("abc123".into())
+            .build()
+    }
+
+    #[test]
+    fn timestamp_regression_rejected() {
+        let store = BookStore::new();
+        let u1 = make_update_ts(vec![("0.48", "100")], vec![("0.52", "100")], 2000);
+        assert!(store.apply("t1", &u1));
+
+        // Older timestamp should be rejected
+        let u2 = make_update_ts(vec![("0.49", "50")], vec![("0.51", "50")], 1000);
+        assert!(!store.apply("t1", &u2));
+
+        // Book should still have the original data
+        let book = store.get("t1").unwrap();
+        assert_eq!(book.bids.best().unwrap().price, dec!(0.48));
+        assert_eq!(book.timestamp_ms, 2000);
+    }
+
+    #[test]
+    fn same_timestamp_accepted() {
+        let store = BookStore::new();
+        let u1 = make_update_ts(vec![("0.48", "100")], vec![("0.52", "100")], 1000);
+        assert!(store.apply("t1", &u1));
+
+        let u2 = make_update_ts(vec![("0.49", "100")], vec![("0.51", "100")], 1000);
+        assert!(store.apply("t1", &u2));
+    }
+
+    #[test]
+    fn newer_timestamp_accepted() {
+        let store = BookStore::new();
+        let u1 = make_update_ts(vec![("0.48", "100")], vec![("0.52", "100")], 1000);
+        assert!(store.apply("t1", &u1));
+
+        let u2 = make_update_ts(vec![("0.49", "100")], vec![("0.51", "100")], 2000);
+        assert!(store.apply("t1", &u2));
+
+        let book = store.get("t1").unwrap();
+        assert_eq!(book.bids.best().unwrap().price, dec!(0.49));
+    }
+
+    // ── New: pause/resume tests ──
+
+    #[test]
+    fn pause_and_resume() {
+        let store = BookStore::new();
+        assert!(!store.is_paused());
+        store.pause();
+        assert!(store.is_paused());
+        store.resume();
+        assert!(!store.is_paused());
+    }
+
+    #[test]
+    fn pause_does_not_block_apply() {
+        let store = BookStore::new();
+        store.pause();
+        let u = make_update(vec![("0.48", "100")], vec![("0.52", "100")]);
+        assert!(store.apply("t1", &u));
+        assert!(store.get("t1").is_some());
+    }
+
+    #[test]
+    fn any_stale_detection() {
+        let store = BookStore::new();
+        let u = make_update(vec![("0.48", "100")], vec![("0.52", "100")]);
+        store.apply("t1", &u);
+        // Just applied — not stale
+        assert!(!store.any_stale(std::time::Duration::from_secs(5)));
     }
 }

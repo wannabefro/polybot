@@ -8,8 +8,16 @@ use tracing::info;
 use crate::auth::AuthContext;
 use crate::config::Config;
 use crate::market::book::BookStore;
-use crate::ops::paper::PaperEngine;
+use crate::ops::paper::{PaperEngine, PaperFill};
 use crate::order::pipeline::{self, OrderIntent, OrderResult};
+
+/// Result of placing an order through the router.
+#[derive(Debug)]
+pub struct PlaceResult {
+    pub order_id: String,
+    /// If the paper engine filled immediately, this is Some.
+    pub paper_fill: Option<PaperFill>,
+}
 
 /// Unified order routing — paper or live.
 pub enum OrderRouter {
@@ -29,15 +37,29 @@ impl OrderRouter {
     }
 
     /// Place an order through the appropriate backend.
-    pub async fn place(&self, intent: &OrderIntent, books: &BookStore) -> Result<String> {
+    /// Returns the order ID and (in paper mode) any immediate fill.
+    pub async fn place(&self, intent: &OrderIntent, books: &BookStore) -> Result<PlaceResult> {
         match self {
             Self::Paper(engine) => {
+                let fills_before = engine.fills().len();
                 let id = engine.place_order(intent, books);
-                Ok(id)
+                let fills_after = engine.fills();
+                let paper_fill = if fills_after.len() > fills_before {
+                    fills_after.last().cloned()
+                } else {
+                    None
+                };
+                Ok(PlaceResult {
+                    order_id: id,
+                    paper_fill,
+                })
             }
             Self::Live(ctx) => {
                 let result = pipeline::place_maker_order(ctx, intent).await?;
-                Ok(result.order_id)
+                Ok(PlaceResult {
+                    order_id: result.order_id,
+                    paper_fill: None,
+                })
             }
         }
     }
@@ -122,8 +144,8 @@ mod tests {
         let router = OrderRouter::Paper(engine);
         let books = make_book_store();
 
-        let id = router.place(&test_intent(), &books).await.unwrap();
-        assert!(id.starts_with("paper-"));
+        let result = router.place(&test_intent(), &books).await.unwrap();
+        assert!(result.order_id.starts_with("paper-"));
     }
 
     #[tokio::test]
@@ -143,9 +165,41 @@ mod tests {
         let router = OrderRouter::Paper(engine);
         let books = make_book_store();
 
-        let id = router.place(&test_intent(), &books).await.unwrap();
-        router.cancel(&id).await.unwrap();
+        let result = router.place(&test_intent(), &books).await.unwrap();
+        router.cancel(&result.order_id).await.unwrap();
         assert_eq!(router.paper_engine().unwrap().open_order_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn paper_router_detects_immediate_fill() {
+        let engine = PaperEngine::new();
+        let router = OrderRouter::Paper(engine);
+        let books = make_book_store();
+
+        // Buy at 0.52 crosses the ask at 0.52 → immediate fill
+        let crossing_intent = OrderIntent {
+            token_id: "token1".into(),
+            side: Side::Buy,
+            price: dec!(0.52),
+            size: dec!(10),
+            order_type: OrderType::GTC,
+            post_only: false,
+        };
+        let result = router.place(&crossing_intent, &books).await.unwrap();
+        assert!(result.paper_fill.is_some(), "crossing order should fill immediately");
+        let fill = result.paper_fill.unwrap();
+        assert_eq!(fill.size, dec!(10));
+    }
+
+    #[tokio::test]
+    async fn paper_router_no_fill_for_resting() {
+        let engine = PaperEngine::new();
+        let router = OrderRouter::Paper(engine);
+        let books = make_book_store();
+
+        // Buy at 0.49 doesn't cross the ask at 0.52 → rests
+        let result = router.place(&test_intent(), &books).await.unwrap();
+        assert!(result.paper_fill.is_none(), "resting order should not fill");
     }
 
     #[test]
