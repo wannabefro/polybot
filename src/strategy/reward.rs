@@ -8,7 +8,7 @@ use polymarket_client_sdk::clob::types::{OrderType, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::config::Config;
 use crate::market::book::BookStore;
@@ -278,15 +278,12 @@ fn evaluate_binary_reward(
         return None;
     }
 
-    info!(
+    debug!(
         market = %market.question,
-        token0 = %t0.outcome,
-        token1 = %t1.outcome,
         bid = %bid_price,
         complement = %complement_price,
-        effective_ask = %(Decimal::ONE - complement_price),
         size = %size,
-        "reward: binary quote (buy/buy-complement)"
+        "reward: binary quote"
     );
 
     Some((bid_intent, ask_intent))
@@ -356,12 +353,11 @@ fn evaluate_single_buy_reward(
         return None;
     }
 
-    info!(
+    debug!(
         market = %market.question,
-        outcome = %token.outcome,
         bid = %bid_price,
         size = %size,
-        "reward: single-side buy quote"
+        "reward: single buy quote"
     );
 
     // Return as a pair with the same intent duplicated (caller handles both)

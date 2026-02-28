@@ -5,7 +5,7 @@ use polymarket_client_sdk::clob::ws::{Client as WsClient, types::response::BookU
 use polymarket_client_sdk::types::U256;
 use rand::Rng;
 use tokio::sync::{mpsc, watch};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::market::discovery::TradableMarket;
@@ -59,7 +59,7 @@ pub fn spawn(
                     .filter_map(|id| id.parse::<U256>().ok())
                     .collect();
 
-                info!(count = asset_ids.len(), "ws: subscribing to orderbook streams");
+                debug!(count = asset_ids.len(), "ws: subscribing to orderbook streams");
 
                 match ws_client.subscribe_orderbook(asset_ids) {
                     Ok(stream) => {

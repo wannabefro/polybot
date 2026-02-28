@@ -3,7 +3,7 @@ use anyhow::Result;
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::auth::{AuthClient, AuthContext};
 
@@ -66,12 +66,11 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
     let signed = client.sign(&*ctx.signer, signable).await?;
     let resp = client.post_order(signed).await?;
 
-    info!(
+    debug!(
         order_id = %resp.order_id,
         side = ?intent.side,
         price = %intent.price,
         size = %intent.size.trunc_with_scale(2),
-        token_id = %intent.token_id.chars().take(12).collect::<String>(),
         "order: placed"
     );
 
@@ -89,7 +88,7 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
 #[allow(dead_code)]
 pub async fn cancel(client: &AuthClient, order_id: &str) -> Result<()> {
     client.cancel_order(order_id).await?;
-    info!(order_id, "order: cancelled");
+    debug!(order_id, "order: cancelled");
     Ok(())
 }
 

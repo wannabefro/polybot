@@ -94,7 +94,7 @@ impl Config {
                 env_or("POLYBOT_LLM_POLL_SECS", "10").parse()?,
             ),
             metrics_interval: Duration::from_secs(
-                env_or("POLYBOT_METRICS_SECS", "30").parse()?,
+                env_or("POLYBOT_METRICS_SECS", "60").parse()?,
             ),
             mm_min_size: env_or("POLYBOT_MM_MIN_SIZE", "1.0").parse()?,
             reward_min_size: env_or("POLYBOT_REWARD_MIN_SIZE", "1.0").parse()?,

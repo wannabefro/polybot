@@ -15,7 +15,7 @@ use anyhow::Result;
 use polymarket_client_sdk::clob::types::Side;
 use rust_decimal::Decimal;
 use tokio::time;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::intelligence::signal;
 use crate::market::book::BookStore;
@@ -81,6 +81,11 @@ fn process_fill(
         };
         risk_engine.record_fill(condition_id, &fill.token_id, side, fill.size, fill.notional);
         metrics.inc_fills();
+        info!(
+            "💰 FILL (paper) {} {} @ ${} (${:.2})",
+            if matches!(side, Side::Buy) { "BUY" } else { "SELL" },
+            fill.size, fill.price, fill.notional,
+        );
 
         if needs_hedge {
             hedge_tracker.record_fill(UnhedgedFill {
@@ -103,6 +108,8 @@ fn process_fill(
         let notional = if result.fill_notional > Decimal::ZERO { result.fill_notional } else { intent.price * intent.size };
         risk_engine.record_fill(condition_id, &intent.token_id, intent.side, size, notional);
         metrics.inc_fills();
+        let side_str = if matches!(intent.side, Side::Buy) { "BUY" } else { "SELL" };
+        info!("💰 FILL {} {} @ ${} (${:.2})", side_str, size, intent.price, notional);
 
         if needs_hedge {
             let price = if !size.is_zero() { notional / size } else { intent.price };
@@ -133,7 +140,8 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "polybot=info".into()),
         )
-        .json()
+        .compact()
+        .with_target(false)
         .init();
 
     info!("polybot starting");
@@ -480,7 +488,7 @@ async fn main() -> Result<()> {
                         }
                     }
                     if rebate_intents.is_empty() && mm_count > 0 {
-                        info!(mm_markets_with_books = mm_count, "rebate-mm: markets had books but no quotable intents");
+                        debug!(mm_markets_with_books = mm_count, "rebate-mm: no quotable intents");
                     }
                     let results: Vec<_> = futures::future::join_all(
                         rebate_intents.iter().map(|(intent, _, _, _)| router.place(intent, &books))
@@ -507,7 +515,7 @@ async fn main() -> Result<()> {
                             Err(e) => {
                                 let msg = e.to_string();
                                 if is_transient_order_rejection(&msg) {
-                                    warn!(err = %e, "rebate-mm place rejected (transient)");
+                                    debug!(err = %e, "rebate-mm place rejected (transient)");
                                 } else {
                                     error!(err = %e, "rebate-mm place failed");
                                 }
@@ -566,7 +574,7 @@ async fn main() -> Result<()> {
                         }
                     }
                     if reward_intents.is_empty() {
-                        info!(
+                        debug!(
                             rewards_markets_total = rw_total_rewards_markets,
                             with_books = rw_count,
                             empty_quotes = rw_empty_quotes,
@@ -598,7 +606,7 @@ async fn main() -> Result<()> {
                             Err(e) => {
                                 let msg = e.to_string();
                                 if is_transient_order_rejection(&msg) {
-                                    warn!(err = %e, "reward place rejected (transient)");
+                                    debug!(err = %e, "reward place rejected (transient)");
                                 } else {
                                     error!(err = %e, "reward place failed");
                                 }
@@ -754,35 +762,19 @@ async fn main() -> Result<()> {
             _ = status_tick.tick() => {
                 let universe = universe_rx.borrow().clone();
                 let s = metrics.snapshot();
-                let books_populated = universe.iter()
-                    .flat_map(|m| m.tokens.iter())
-                    .filter(|t| books.get(&t.token_id).is_some())
-                    .count();
                 let books_quotable = books.count_quotable();
-                let books_total = universe.iter()
-                    .map(|m| m.tokens.len())
-                    .sum::<usize>();
-                let mr_positions = mean_revert.open_positions().len();
-                let unhedged = hedge_tracker.unhedged_count();
                 let halted = risk_engine.is_halted();
 
                 info!(
-                    nav = format!("{live_nav:.2}"),
-                    markets = universe.len(),
-                    books = %format!("{}/{}/{}", books_quotable, books_populated, books_total),
-                    active_quotes = active_quotes.len(),
-                    quotes_sent = s.quotes_sent,
-                    fills = s.fills_count,
-                    pnl = %s.daily_pnl,
-                    rebate = %s.rebate_accrual,
-                    mr_positions,
-                    unhedged,
-                    risk_rejections = s.risk_rejections,
-                    cancel_failures = s.cancel_failures,
-                    ws_reconnects = s.ws_reconnects,
-                    throttled = s.throttle_count,
-                    halted,
-                    "📊 status"
+                    "📊 NAV ${:.2} | quotes {}/{} | fills {} | pnl {} | markets {} | books {} | {}",
+                    live_nav,
+                    active_quotes.len(),
+                    s.quotes_sent,
+                    s.fills_count,
+                    s.daily_pnl,
+                    universe.len(),
+                    books_quotable,
+                    if halted { "⛔ HALTED" } else { "✅ OK" },
                 );
             }
         }

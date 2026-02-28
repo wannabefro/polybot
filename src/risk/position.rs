@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use rust_decimal::Decimal;
 use tokio::time;
-use tracing::{error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::auth::{AuthClient, Signer};
 use crate::config::Config;
@@ -125,7 +125,7 @@ pub fn spawn_recon(
                         );
                         risk_engine.halt("position reconciliation mismatch");
                     } else {
-                        info!(
+                        debug!(
                             remote_positions = remote.len(),
                             mismatch = %mismatch,
                             "position-recon: OK"

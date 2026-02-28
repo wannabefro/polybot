@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
 use tokio::time;
-use tracing::{error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::auth::AuthClient;
 use crate::config::Config;
@@ -244,7 +244,7 @@ pub async fn enrich_volume(gamma_host: &str, markets: &mut [TradableMarket]) {
     if rate_limited > 0 {
         warn!(rate_limited, "discovery: gamma enrichment hit rate limits");
     }
-    info!(enriched, total = enrich_count, "discovery: volume enrichment complete");
+    debug!(enriched, total = enrich_count, "discovery: volume enrichment complete");
 }
 
 /// Spawn the discovery loop. Returns a watch receiver for the current universe.
@@ -262,7 +262,7 @@ pub fn spawn(
             ticker.tick().await;
             match fetch_all_markets(&client, &gamma_host).await {
                 Ok(markets) => {
-                    info!(count = markets.len(), "discovery: refreshed tradable universe");
+                    debug!(count = markets.len(), "discovery: refreshed tradable universe");
                     let _ = tx.send(Arc::new(markets));
                 }
                 Err(e) => {
