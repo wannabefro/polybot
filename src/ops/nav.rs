@@ -28,6 +28,9 @@ pub struct NavSnapshot {
     pub total_nav: f64,
 }
 
+/// USDC has 6 decimals on Polygon.
+const USDC_DECIMALS: u32 = 6;
+
 /// Fetch collateral balance from the CLOB exchange API.
 async fn fetch_clob_balance(
     client: &Client<Authenticated<Normal>>,
@@ -46,8 +49,11 @@ async fn fetch_clob_balance(
         debug!(raw_balance = %resp.balance, allowances = ?resp.allowances, "nav: CLOB response");
     }
 
+    // CLOB returns raw USDC units (6 decimals), e.g. 208819075 = $208.82
     use rust_decimal::prelude::ToPrimitive;
-    Ok(resp.balance.to_f64().unwrap_or(0.0))
+    let divisor = rust_decimal::Decimal::from(10u64.pow(USDC_DECIMALS));
+    let balance = resp.balance / divisor;
+    Ok(balance.to_f64().unwrap_or(0.0))
 }
 
 /// Spawn the NAV tracking loop.
