@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use polymarket_client_sdk::auth::{state::Authenticated, LocalSigner, Normal, Signer as _};
 use polymarket_client_sdk::clob::{Client, Config as SdkConfig};
+use polymarket_client_sdk::clob::types::SignatureType;
 use tracing::info;
 
 use crate::config::Config;
@@ -40,6 +41,7 @@ pub async fn init(config: &Config) -> Result<AuthContext> {
 
     let client = Client::new(&config.clob_host, sdk_config)?
         .authentication_builder(&signer)
+        .signature_type(SignatureType::Proxy)
         .authenticate()
         .await?;
 
