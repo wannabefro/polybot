@@ -34,17 +34,20 @@ pub async fn fetch_remote_positions(address: &str) -> Result<HashMap<String, Dec
     match resp {
         Ok(r) if r.status().is_success() => {
             #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
             struct PosEntry {
                 asset: Option<String>,
-                size: Option<String>,
+                size: Option<f64>,
             }
 
             let entries: Vec<PosEntry> = r.json().await.unwrap_or_default();
             let mut map = HashMap::new();
             for entry in entries {
-                if let (Some(asset), Some(size_str)) = (entry.asset, entry.size) {
-                    if let Ok(size) = size_str.parse::<Decimal>() {
-                        map.insert(asset, size);
+                if let (Some(asset), Some(size)) = (entry.asset, entry.size) {
+                    if let Some(d) = Decimal::from_f64_retain(size) {
+                        if d > Decimal::ZERO {
+                            map.insert(asset, d);
+                        }
                     }
                 }
             }
