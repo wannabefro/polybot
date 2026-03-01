@@ -82,71 +82,71 @@ impl Config {
         Ok(Self {
             clob_host: env_or("POLYBOT_CLOB_HOST", "https://clob.polymarket.com"),
             gamma_host: env_or("POLYBOT_GAMMA_HOST", "https://gamma-api.polymarket.com"),
-            chain_id: env_or("POLYBOT_CHAIN_ID", "137").parse()?,
+            chain_id: parse_env("POLYBOT_CHAIN_ID", "137")?,
             private_key: std::env::var("POLYBOT_PRIVATE_KEY")
                 .map_err(|_| anyhow::anyhow!("POLYBOT_PRIVATE_KEY is required"))?,
-            paper_mode: env_or("POLYBOT_PAPER_MODE", "true").parse()?,
-            nav_usdc: env_or("POLYBOT_NAV_USDC", "1000.0").parse()?,
-            max_notional_per_market: env_or("POLYBOT_MAX_NOTIONAL_PCT", "0.02").parse()?,
-            max_gross_exposure: env_or("POLYBOT_MAX_GROSS_PCT", "0.50").parse()?,
-            max_one_sided_inventory: env_or("POLYBOT_MAX_INVENTORY_PCT", "0.04").parse()?,
-            daily_loss_stop: env_or("POLYBOT_DAILY_LOSS_PCT", "0.05").parse()?,
+            paper_mode: parse_env("POLYBOT_PAPER_MODE", "true")?,
+            nav_usdc: parse_env("POLYBOT_NAV_USDC", "1000.0")?,
+            max_notional_per_market: parse_env("POLYBOT_MAX_NOTIONAL_PCT", "0.02")?,
+            max_gross_exposure: parse_env("POLYBOT_MAX_GROSS_PCT", "0.50")?,
+            max_one_sided_inventory: parse_env("POLYBOT_MAX_INVENTORY_PCT", "0.04")?,
+            daily_loss_stop: parse_env("POLYBOT_DAILY_LOSS_PCT", "0.05")?,
             heartbeat_interval: Duration::from_secs(
-                env_or("POLYBOT_HEARTBEAT_SECS", "5").parse()?,
+                parse_env("POLYBOT_HEARTBEAT_SECS", "5")?,
             ),
             geoblock_poll_interval: Duration::from_secs(
-                env_or("POLYBOT_GEOBLOCK_POLL_SECS", "900").parse()?,
+                parse_env("POLYBOT_GEOBLOCK_POLL_SECS", "900")?,
             ),
             discovery_interval: Duration::from_secs(
-                env_or("POLYBOT_DISCOVERY_SECS", "60").parse()?,
+                parse_env("POLYBOT_DISCOVERY_SECS", "60")?,
             ),
             position_recon_interval: Duration::from_secs(
-                env_or("POLYBOT_RECON_SECS", "45").parse()?,
+                parse_env("POLYBOT_RECON_SECS", "45")?,
             ),
             stale_feed_threshold: Duration::from_millis(
-                env_or("POLYBOT_STALE_FEED_MS", "1500").parse()?,
+                parse_env("POLYBOT_STALE_FEED_MS", "1500")?,
             ),
-            mean_revert_max_nav_frac: env_or("POLYBOT_MR_MAX_NAV_PCT", "0.005").parse()?,
-            mean_revert_min_volume_24h: env_or("POLYBOT_MR_MIN_VOL_24H", "10000.0").parse()?,
+            mean_revert_max_nav_frac: parse_env("POLYBOT_MR_MAX_NAV_PCT", "0.005")?,
+            mean_revert_min_volume_24h: parse_env("POLYBOT_MR_MIN_VOL_24H", "10000.0")?,
             hedge_timeout: Duration::from_secs(
-                env_or("POLYBOT_HEDGE_TIMEOUT_SECS", "120").parse()?,
+                parse_env("POLYBOT_HEDGE_TIMEOUT_SECS", "120")?,
             ),
-            rate_limit_per_sec: env_or("POLYBOT_RATE_LIMIT_PS", "70.0").parse()?,
+            rate_limit_per_sec: parse_env("POLYBOT_RATE_LIMIT_PS", "70.0")?,
             llm_poll_interval: Duration::from_secs(
-                env_or("POLYBOT_LLM_POLL_SECS", "10").parse()?,
+                parse_env("POLYBOT_LLM_POLL_SECS", "10")?,
             ),
             metrics_interval: Duration::from_secs(
-                env_or("POLYBOT_METRICS_SECS", "60").parse()?,
+                parse_env("POLYBOT_METRICS_SECS", "60")?,
             ),
-            mm_min_size: env_or("POLYBOT_MM_MIN_SIZE", "1.0").parse()?,
-            reward_min_size: env_or("POLYBOT_REWARD_MIN_SIZE", "1.0").parse()?,
-            reward_min_nav_usdc: env_or("POLYBOT_REWARD_MIN_NAV_USDC", "25.0").parse()?,
-            mean_revert_min_nav_usdc: env_or("POLYBOT_MR_MIN_NAV_USDC", "100.0").parse()?,
-            small_account_nav_threshold: env_or("POLYBOT_SMALL_ACCOUNT_NAV_THRESHOLD", "500.0").parse()?,
-            small_account_min_per_market_pct: env_or("POLYBOT_SMALL_MIN_PER_MARKET_PCT", "0.12").parse()?,
-            small_account_min_inventory_pct: env_or("POLYBOT_SMALL_MIN_INVENTORY_PCT", "0.10").parse()?,
-            neg_risk_stale_secs: env_or("POLYBOT_NR_STALE_SECS", "10").parse()?,
-            quote_tick_secs: env_or("POLYBOT_QUOTE_TICK_SECS", "10").parse()?,
+            mm_min_size: parse_env("POLYBOT_MM_MIN_SIZE", "1.0")?,
+            reward_min_size: parse_env("POLYBOT_REWARD_MIN_SIZE", "1.0")?,
+            reward_min_nav_usdc: parse_env("POLYBOT_REWARD_MIN_NAV_USDC", "25.0")?,
+            mean_revert_min_nav_usdc: parse_env("POLYBOT_MR_MIN_NAV_USDC", "100.0")?,
+            small_account_nav_threshold: parse_env("POLYBOT_SMALL_ACCOUNT_NAV_THRESHOLD", "500.0")?,
+            small_account_min_per_market_pct: parse_env("POLYBOT_SMALL_MIN_PER_MARKET_PCT", "0.12")?,
+            small_account_min_inventory_pct: parse_env("POLYBOT_SMALL_MIN_INVENTORY_PCT", "0.10")?,
+            neg_risk_stale_secs: parse_env("POLYBOT_NR_STALE_SECS", "10")?,
+            quote_tick_secs: parse_env("POLYBOT_QUOTE_TICK_SECS", "10")?,
             quote_max_age: Duration::from_secs(
-                env_or("POLYBOT_QUOTE_MAX_AGE_SECS", "60").parse()?,
+                parse_env("POLYBOT_QUOTE_MAX_AGE_SECS", "60")?,
             ),
-            max_ws_tokens: env_or("POLYBOT_MAX_WS_TOKENS", "500").parse()?,
-            scalper_min_spread_ticks: env_or("POLYBOT_SCALPER_MIN_SPREAD_TICKS", "4").parse()?,
-            scalper_min_touch_notional_usdc: env_or("POLYBOT_SCALPER_MIN_TOUCH_NOTIONAL_USDC", "10.0").parse()?,
-            scalper_min_vol_24h: env_or("POLYBOT_SCALPER_MIN_VOL_24H", "1000.0").parse()?,
-            scalper_max_vol_24h: env_or("POLYBOT_SCALPER_MAX_VOL_24H", "250000.0").parse()?,
-            scalper_refresh_secs: env_or("POLYBOT_SCALPER_REFRESH_SECS", "30").parse()?,
-            scalper_reprice_ticks: env_or("POLYBOT_SCALPER_REPRICE_TICKS", "3").parse()?,
-            scalper_small_max_markets: env_or("POLYBOT_SCALPER_SMALL_MAX_MARKETS", "2").parse()?,
-            unwind_stage1_secs: env_or("POLYBOT_UNWIND_STAGE1_SECS", "60").parse()?,
-            unwind_stage2_secs: env_or("POLYBOT_UNWIND_STAGE2_SECS", "90").parse()?,
-            unwind_hard_stop_secs: env_or("POLYBOT_UNWIND_HARD_STOP_SECS", "120").parse()?,
-            unwind_cooldown_secs: env_or("POLYBOT_UNWIND_COOLDOWN_SECS", "900").parse()?,
-            decay_enabled: env_or("POLYBOT_DECAY_ENABLED", "true").parse()?,
-            decay_min_price: env_or("POLYBOT_DECAY_MIN_PRICE", "0.80").parse()?,
-            decay_max_bet_usdc: env_or("POLYBOT_DECAY_MAX_BET_USDC", "15.0").parse()?,
-            decay_window_hours: env_or("POLYBOT_DECAY_WINDOW_HOURS", "168.0").parse()?,
-            decay_nav_fraction: env_or("POLYBOT_DECAY_NAV_FRACTION", "0.70").parse()?,
+            max_ws_tokens: parse_env("POLYBOT_MAX_WS_TOKENS", "500")?,
+            scalper_min_spread_ticks: parse_env("POLYBOT_SCALPER_MIN_SPREAD_TICKS", "4")?,
+            scalper_min_touch_notional_usdc: parse_env("POLYBOT_SCALPER_MIN_TOUCH_NOTIONAL_USDC", "10.0")?,
+            scalper_min_vol_24h: parse_env("POLYBOT_SCALPER_MIN_VOL_24H", "1000.0")?,
+            scalper_max_vol_24h: parse_env("POLYBOT_SCALPER_MAX_VOL_24H", "250000.0")?,
+            scalper_refresh_secs: parse_env("POLYBOT_SCALPER_REFRESH_SECS", "30")?,
+            scalper_reprice_ticks: parse_env("POLYBOT_SCALPER_REPRICE_TICKS", "3")?,
+            scalper_small_max_markets: parse_env("POLYBOT_SCALPER_SMALL_MAX_MARKETS", "2")?,
+            unwind_stage1_secs: parse_env("POLYBOT_UNWIND_STAGE1_SECS", "60")?,
+            unwind_stage2_secs: parse_env("POLYBOT_UNWIND_STAGE2_SECS", "90")?,
+            unwind_hard_stop_secs: parse_env("POLYBOT_UNWIND_HARD_STOP_SECS", "120")?,
+            unwind_cooldown_secs: parse_env("POLYBOT_UNWIND_COOLDOWN_SECS", "900")?,
+            decay_enabled: parse_env("POLYBOT_DECAY_ENABLED", "true")?,
+            decay_min_price: parse_env("POLYBOT_DECAY_MIN_PRICE", "0.80")?,
+            decay_max_bet_usdc: parse_env("POLYBOT_DECAY_MAX_BET_USDC", "15.0")?,
+            decay_window_hours: parse_env("POLYBOT_DECAY_WINDOW_HOURS", "168.0")?,
+            decay_nav_fraction: parse_env("POLYBOT_DECAY_NAV_FRACTION", "0.70")?,
             decay_excluded_tags: env_or(
                 "POLYBOT_DECAY_EXCLUDED_TAGS",
                 "crypto,sports,bitcoin,ethereum,btc,eth",
@@ -224,6 +224,15 @@ impl Config {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+fn parse_env<T: std::str::FromStr>(key: &str, default: &str) -> anyhow::Result<T>
+where
+    T::Err: std::fmt::Display,
+{
+    let raw = env_or(key, default);
+    raw.parse::<T>()
+        .map_err(|e| anyhow::anyhow!("failed to parse {key}={raw:?}: {e}"))
 }
 
 /// Build a Config with safe defaults for testing (no env vars needed).
