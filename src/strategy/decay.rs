@@ -7,7 +7,6 @@
 use chrono::{DateTime, Utc};
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use tracing::{debug, info};
@@ -25,6 +24,7 @@ pub struct DecayTracker {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DecayPosition {
     pub token_id: String,
     pub condition_id: String,
@@ -219,7 +219,7 @@ pub fn evaluate_decay_buy(
 
     // Calculate size: spend / price (how many shares we get)
     let size = (usdc_to_spend / candidate.price)
-        .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::RoundDown);
+        .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
 
     if size < candidate.min_order_size || size <= Decimal::ZERO {
         return None;
