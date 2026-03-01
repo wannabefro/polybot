@@ -23,8 +23,22 @@ pub struct PositionSnapshot {
 /// Maximum acceptable mismatch between local and remote positions (% of NAV).
 const RECON_MISMATCH_THRESHOLD_PCT: f64 = 0.05; // 5% NAV
 
-/// Fetch positions from the Polymarket data API.
+/// A position entry from the data API, including condition_id.
+#[derive(Debug, Clone)]
+pub struct RemotePosition {
+    pub token_id: String,
+    pub condition_id: String,
+    pub size: Decimal,
+}
+
+/// Fetch positions from the Polymarket data API (token_id → size only).
 pub async fn fetch_remote_positions(address: &str) -> Result<HashMap<String, Decimal>> {
+    let entries = fetch_remote_positions_full(address).await?;
+    Ok(entries.into_iter().map(|p| (p.token_id, p.size)).collect())
+}
+
+/// Fetch positions with full metadata (token_id, condition_id, size).
+pub async fn fetch_remote_positions_full(address: &str) -> Result<Vec<RemotePosition>> {
     let data_host = std::env::var("POLYBOT_DATA_HOST")
         .unwrap_or_else(|_| "https://data-api.polymarket.com".into());
 
@@ -37,21 +51,28 @@ pub async fn fetch_remote_positions(address: &str) -> Result<HashMap<String, Dec
             #[serde(rename_all = "camelCase")]
             struct PosEntry {
                 asset: Option<String>,
+                condition_id: Option<String>,
                 size: Option<f64>,
             }
 
             let entries: Vec<PosEntry> = r.json().await.unwrap_or_default();
-            let mut map = HashMap::new();
+            let mut result = Vec::new();
             for entry in entries {
-                if let (Some(asset), Some(size)) = (entry.asset, entry.size) {
+                if let (Some(asset), Some(cid), Some(size)) =
+                    (entry.asset, entry.condition_id, entry.size)
+                {
                     if let Some(d) = Decimal::from_f64_retain(size) {
                         if d > Decimal::ZERO {
-                            map.insert(asset, d);
+                            result.push(RemotePosition {
+                                token_id: asset,
+                                condition_id: cid,
+                                size: d,
+                            });
                         }
                     }
                 }
             }
-            Ok(map)
+            Ok(result)
         }
         Ok(r) => {
             warn!(status = %r.status(), "position-recon: data API returned error");

@@ -24,6 +24,9 @@ pub struct DecayTracker {
     /// token_ids already held on-chain (bootstrapped from positions API).
     /// Prevents duplicate buys after restart.
     held_tokens: std::collections::HashSet<String>,
+    /// condition_ids already held on-chain.
+    /// Prevents buying the opposite outcome of a held market.
+    held_conditions: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,18 +46,23 @@ impl DecayTracker {
         Self {
             positions: HashMap::new(),
             held_tokens: std::collections::HashSet::new(),
+            held_conditions: std::collections::HashSet::new(),
         }
     }
 
-    /// Seed with token_ids from on-chain positions to prevent duplicate buys.
-    pub fn seed_held_tokens(&mut self, remote: &HashMap<String, Decimal>) {
-        for (token_id, size) in remote {
-            if *size > Decimal::ZERO {
-                self.held_tokens.insert(token_id.clone());
-            }
+    /// Seed with full position data from the on-chain positions API.
+    /// Tracks both token_ids and condition_ids to prevent any duplicate buys.
+    pub fn seed_from_remote(&mut self, positions: &[crate::risk::position::RemotePosition]) {
+        for pos in positions {
+            self.held_tokens.insert(pos.token_id.clone());
+            self.held_conditions.insert(pos.condition_id.clone());
         }
         if !self.held_tokens.is_empty() {
-            info!(count = self.held_tokens.len(), "decay: seeded held tokens from on-chain positions");
+            info!(
+                tokens = self.held_tokens.len(),
+                conditions = self.held_conditions.len(),
+                "decay: seeded held positions from on-chain"
+            );
         }
     }
 
@@ -285,9 +293,15 @@ pub fn evaluate_decay_buy(
         return None;
     }
 
-    // Already hold this token on-chain (from prior run)?
-    if tracker.held_tokens.contains(&candidate.token_id) {
-        debug!(token_id = %candidate.token_id, "decay: skip — already held on-chain");
+    // Already hold this token or any token in this condition on-chain?
+    if tracker.held_tokens.contains(&candidate.token_id)
+        || tracker.held_conditions.contains(&candidate.condition_id)
+    {
+        debug!(
+            token_id = %candidate.token_id,
+            condition_id = %candidate.condition_id,
+            "decay: skip — already held on-chain"
+        );
         return None;
     }
 

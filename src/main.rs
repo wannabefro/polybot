@@ -465,9 +465,9 @@ async fn main() -> Result<()> {
 
     // Bootstrap decay tracker with on-chain positions to prevent duplicate buys.
     {
-        match risk::position::fetch_remote_positions(&proxy_address).await {
+        match risk::position::fetch_remote_positions_full(&proxy_address).await {
             Ok(ref positions) if !positions.is_empty() => {
-                decay_tracker.seed_held_tokens(positions);
+                decay_tracker.seed_from_remote(positions);
             }
             _ => {} // already logged above during risk engine bootstrap
         }
@@ -1176,6 +1176,15 @@ async fn main() -> Result<()> {
                                         intent.price,
                                         intent.neg_risk,
                                         intent.fee_rate_bps,
+                                    );
+                                    // Also record in risk engine so position recon stays in sync.
+                                    let notional = fill_size * intent.price;
+                                    risk_engine.record_fill(
+                                        &candidate.condition_id,
+                                        &candidate.token_id,
+                                        Side::Buy,
+                                        fill_size,
+                                        notional,
                                     );
                                     decay_buys += 1;
                                     info!(
