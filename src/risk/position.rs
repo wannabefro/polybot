@@ -101,6 +101,7 @@ pub fn spawn_recon(
     let threshold = Decimal::from_f64_retain(nav * RECON_MISMATCH_THRESHOLD_PCT)
         .unwrap_or(Decimal::from(100));
     let address = format!("{:#x}", signer.address());
+    let paper_mode = config.paper_mode;
 
     tokio::spawn(async move {
         let mut ticker = time::interval(interval);
@@ -109,6 +110,12 @@ pub fn spawn_recon(
 
             if risk_engine.is_halted() {
                 debug!("position-recon: risk engine halted, skipping");
+                continue;
+            }
+
+            // Paper fills never hit the chain — nothing to reconcile.
+            if paper_mode {
+                debug!("position-recon: paper mode, skipping");
                 continue;
             }
 
