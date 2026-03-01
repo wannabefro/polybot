@@ -48,6 +48,7 @@ fn make_market(rewards: bool, volume: f64) -> TradableMarket {
         rewards_min_size: None,
         volume_24h: volume,
         tags: vec![],
+        end_date: None,
     }
 }
 
@@ -638,4 +639,119 @@ async fn inventory_skew_shifts_quotes() {
 
     // When long, bid should be lower or equal (less eager to buy more)
     assert!(bid_l.price <= bid_n.price, "long inventory should lower bid price: got {} vs baseline {}", bid_l.price, bid_n.price);
+}
+
+/// Decay strategy: full paper-mode buy cycle.
+#[tokio::test]
+async fn decay_buy_paper_cycle() {
+    use chrono::{Utc, Duration as ChronoDuration};
+
+    let mut cfg = test_config();
+    cfg.decay_enabled = true;
+    cfg.decay_min_price = 0.93;
+    cfg.decay_max_bet_usdc = 2.0;
+    cfg.decay_window_hours = 24.0;
+    cfg.decay_nav_fraction = 0.50;
+    cfg.paper_mode = true;
+
+    let now = Utc::now();
+    let end = now + ChronoDuration::hours(10);
+
+    let market = TradableMarket {
+        condition_id: "decay_cond".into(),
+        question: "Will event happen?".into(),
+        tokens: vec![
+            TokenInfo {
+                token_id: "decay_yes".into(),
+                outcome: "Yes".into(),
+                price: dec!(0.95),
+            },
+            TokenInfo {
+                token_id: "decay_no".into(),
+                outcome: "No".into(),
+                price: dec!(0.05),
+            },
+        ],
+        neg_risk: false,
+        neg_risk_market_id: None,
+        min_tick_size: dec!(0.01),
+        min_order_size: dec!(1),
+        maker_fee_bps: dec!(0),
+        rewards_active: false,
+        rewards_max_spread: None,
+        rewards_min_size: None,
+        volume_24h: 0.0,
+        tags: vec![],
+        end_date: Some(end),
+    };
+
+    let books = BookStore::new();
+    seed_book(&books, "decay_yes", "0.94", "0.95");
+
+    let mut tracker = strategy::decay::DecayTracker::new();
+    let candidates = strategy::decay::scan_candidates(&[market.clone()], &books, &cfg, now);
+    assert_eq!(candidates.len(), 1, "should find exactly one decay candidate");
+
+    let intent = strategy::decay::evaluate_decay_buy(&candidates[0], &cfg, &tracker)
+        .expect("should produce a buy intent");
+    assert_eq!(intent.side, Side::Buy);
+    assert_eq!(intent.order_type, OrderType::FOK);
+    assert!(intent.size > Decimal::ZERO);
+
+    // Place via paper router
+    let paper = PaperEngine::new();
+    let router = OrderRouter::Paper(paper.clone());
+    let result = router.place(&intent, &books).await.expect("paper place should succeed");
+    assert!(result.paper_fill.is_some(), "FOK buy at ask should fill in paper mode");
+
+    // Record in tracker
+    let pf = result.paper_fill.unwrap();
+    tracker.record_fill(
+        "decay_cond", "decay_yes", "Yes",
+        pf.size, intent.price, false, dec!(0),
+    );
+    assert_eq!(tracker.position_count(), 1);
+    assert!(tracker.deployed_capital() > Decimal::ZERO);
+
+    // Duplicate market should be skipped
+    assert!(
+        strategy::decay::evaluate_decay_buy(&candidates[0], &cfg, &tracker).is_none(),
+        "should not buy same market twice"
+    );
+}
+
+/// Decay strategy: crypto tag exclusion.
+#[tokio::test]
+async fn decay_excludes_crypto_markets() {
+    use chrono::{Utc, Duration as ChronoDuration};
+
+    let cfg = test_config();
+    let now = Utc::now();
+    let end = now + ChronoDuration::hours(10);
+
+    let market = TradableMarket {
+        condition_id: "btc_cond".into(),
+        question: "BTC above 100k?".into(),
+        tokens: vec![
+            TokenInfo { token_id: "btc_yes".into(), outcome: "Yes".into(), price: dec!(0.96) },
+            TokenInfo { token_id: "btc_no".into(), outcome: "No".into(), price: dec!(0.04) },
+        ],
+        neg_risk: false,
+        neg_risk_market_id: None,
+        min_tick_size: dec!(0.01),
+        min_order_size: dec!(1),
+        maker_fee_bps: dec!(0),
+        rewards_active: false,
+        rewards_max_spread: None,
+        rewards_min_size: None,
+        volume_24h: 0.0,
+        tags: vec!["Crypto".into(), "Bitcoin".into()],
+        end_date: Some(end),
+    };
+
+    let books = BookStore::new();
+    seed_book(&books, "btc_yes", "0.95", "0.96");
+
+    let candidates = strategy::decay::scan_candidates(&[market], &books, &cfg, now);
+    assert!(candidates.is_empty(), "crypto markets should be excluded");
 }

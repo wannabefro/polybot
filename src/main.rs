@@ -229,6 +229,7 @@ async fn main() -> Result<()> {
     let mut mean_revert = MeanRevertState::new();
     let mut hedge_tracker = HedgeTracker::new(cfg.hedge_timeout);
     let mut active_quotes: HashMap<String, ActiveQuote> = HashMap::new();
+    let mut decay_tracker = strategy::decay::DecayTracker::new();
     let mut reward_enabled = cfg.nav_usdc >= cfg.reward_min_nav_usdc;
     let mut mean_revert_enabled = cfg.nav_usdc >= cfg.mean_revert_min_nav_usdc;
     let mut max_markets = cfg.max_active_markets();
@@ -783,6 +784,72 @@ async fn main() -> Result<()> {
                     }
                 }
 
+                // ── Time-decay strategy ──
+                if cfg.decay_enabled {
+                    // Cleanup resolved markets
+                    decay_tracker.cleanup_resolved(&universe);
+
+                    let candidates = strategy::decay::scan_candidates(
+                        &universe, &books, &cfg, chrono::Utc::now(),
+                    );
+                    let mut decay_buys = 0u32;
+                    for candidate in &candidates {
+                        if rate_limiter.try_acquire().is_err() {
+                            break;
+                        }
+                        let Some(intent) = strategy::decay::evaluate_decay_buy(
+                            candidate, &cfg, &decay_tracker,
+                        ) else {
+                            continue;
+                        };
+                        match router.place(&intent, &books).await {
+                            Ok(result) => {
+                                let filled = result.paper_fill.is_some() || result.live_matched;
+                                if filled {
+                                    let fill_size = if let Some(ref pf) = result.paper_fill {
+                                        pf.size
+                                    } else {
+                                        result.fill_size
+                                    };
+                                    decay_tracker.record_fill(
+                                        &candidate.condition_id,
+                                        &candidate.token_id,
+                                        &candidate.outcome,
+                                        fill_size,
+                                        intent.price,
+                                        intent.neg_risk,
+                                        intent.fee_rate_bps,
+                                    );
+                                    decay_buys += 1;
+                                    info!(
+                                        outcome = %candidate.outcome,
+                                        price = %intent.price,
+                                        size = %fill_size,
+                                        hours_to_end = candidate.hours_to_end,
+                                        "🕐 decay: bought shares"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                let msg = e.to_string();
+                                if is_transient_order_rejection(&msg) {
+                                    debug!(err = %e, "decay place rejected (transient)");
+                                } else {
+                                    error!(err = %e, "decay place failed");
+                                }
+                            }
+                        }
+                    }
+                    if decay_buys > 0 {
+                        debug!(
+                            buys = decay_buys,
+                            deployed = %decay_tracker.deployed_capital(),
+                            positions = decay_tracker.position_count(),
+                            "decay: tick summary"
+                        );
+                    }
+                }
+
                 let quote_age_ms = active_quotes
                     .values()
                     .map(|q| q.placed_at.elapsed().as_millis() as u64)
@@ -815,15 +882,19 @@ async fn main() -> Result<()> {
                 let books_quotable = books.count_quotable();
                 let halted = risk_engine.is_halted();
                 let rewards = reward_tracker.total();
+                let decay_deployed = decay_tracker.deployed_capital();
+                let decay_count = decay_tracker.position_count();
 
                 info!(
-                    "📊 NAV ${:.2} | quotes {}/{} | fills {} | pnl {} | rewards ${:.2} | markets {} | books {} | {}",
+                    "📊 NAV ${:.2} | quotes {}/{} | fills {} | pnl {} | rewards ${:.2} | decay ${:.2}({}) | markets {} | books {} | {}",
                     live_nav,
                     active_quotes.len(),
                     s.quotes_sent,
                     s.fills_count,
                     s.daily_pnl,
                     rewards,
+                    decay_deployed,
+                    decay_count,
                     universe.len(),
                     books_quotable,
                     if halted { "⛔ HALTED" } else { "✅ OK" },

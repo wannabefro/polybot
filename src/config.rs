@@ -53,6 +53,14 @@ pub struct Config {
     #[allow(dead_code)]
     pub quote_max_age: Duration,
     pub max_ws_tokens: usize,
+
+    // ── Decay (time-decay penny collector) strategy ──
+    pub decay_enabled: bool,
+    pub decay_min_price: f64,
+    pub decay_max_bet_usdc: f64,
+    pub decay_window_hours: f64,
+    pub decay_nav_fraction: f64,
+    pub decay_excluded_tags: Vec<String>,
 }
 
 impl Config {
@@ -109,6 +117,19 @@ impl Config {
                 env_or("POLYBOT_QUOTE_MAX_AGE_SECS", "60").parse()?,
             ),
             max_ws_tokens: env_or("POLYBOT_MAX_WS_TOKENS", "500").parse()?,
+            decay_enabled: env_or("POLYBOT_DECAY_ENABLED", "true").parse()?,
+            decay_min_price: env_or("POLYBOT_DECAY_MIN_PRICE", "0.93").parse()?,
+            decay_max_bet_usdc: env_or("POLYBOT_DECAY_MAX_BET_USDC", "2.0").parse()?,
+            decay_window_hours: env_or("POLYBOT_DECAY_WINDOW_HOURS", "24.0").parse()?,
+            decay_nav_fraction: env_or("POLYBOT_DECAY_NAV_FRACTION", "0.50").parse()?,
+            decay_excluded_tags: env_or(
+                "POLYBOT_DECAY_EXCLUDED_TAGS",
+                "crypto,sports,bitcoin,ethereum,btc,eth",
+            )
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
         })
     }
 
@@ -207,6 +228,15 @@ pub fn test_config() -> Config {
         quote_tick_secs: 5,
         quote_max_age: Duration::from_secs(20),
         max_ws_tokens: 500,
+        decay_enabled: true,
+        decay_min_price: 0.93,
+        decay_max_bet_usdc: 2.0,
+        decay_window_hours: 24.0,
+        decay_nav_fraction: 0.50,
+        decay_excluded_tags: vec![
+            "crypto".into(), "sports".into(), "bitcoin".into(),
+            "ethereum".into(), "btc".into(), "eth".into(),
+        ],
     }
 }
 

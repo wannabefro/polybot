@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::StreamExt;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,6 +30,7 @@ pub struct TradableMarket {
     pub rewards_min_size: Option<Decimal>,
     pub volume_24h: f64,
     pub tags: Vec<String>,
+    pub end_date: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +107,7 @@ async fn fetch_all_markets(client: &AuthClient, gamma_host: &str) -> Result<Vec<
             // volume_24h not available from CLOB API; enriched via Gamma API later
             volume_24h: 0.0,
             tags: m.tags.clone(),
+            end_date: m.end_date_iso,
         });
     }
 

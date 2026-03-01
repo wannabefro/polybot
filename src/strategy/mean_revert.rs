@@ -341,6 +341,7 @@ mod tests {
             rewards_min_size: None,
             volume_24h: volume,
             tags: vec![],
+            end_date: None,
         }
     }
 
