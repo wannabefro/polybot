@@ -10,8 +10,10 @@ Group=polybot
 WorkingDirectory=/opt/polybot
 ExecStart=/opt/polybot/polybot
 EnvironmentFile=/opt/polybot/.env
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGINT
+TimeoutStopSec=15
 
 # Security hardening
 NoNewPrivileges=true

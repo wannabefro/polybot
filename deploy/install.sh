@@ -3,6 +3,10 @@ set -euo pipefail
 
 # Install script for polybot systemd service.
 # Run as root or with sudo.
+#
+# Usage:
+#   ./install.sh              # build locally and install
+#   ./install.sh /path/to/polybot  # install pre-built binary
 
 INSTALL_DIR=/opt/polybot
 SERVICE_USER=polybot
@@ -12,9 +16,14 @@ id -u "$SERVICE_USER" &>/dev/null || useradd --system --no-create-home --shell /
 mkdir -p "$INSTALL_DIR/data"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 
-echo "==> Building release binary..."
-cargo build --release
-cp target/release/polybot "$INSTALL_DIR/polybot"
+if [ -n "${1:-}" ] && [ -f "$1" ]; then
+    echo "==> Installing pre-built binary from $1..."
+    cp "$1" "$INSTALL_DIR/polybot"
+else
+    echo "==> Building release binary..."
+    cargo build --release
+    cp target/release/polybot "$INSTALL_DIR/polybot"
+fi
 chmod 755 "$INSTALL_DIR/polybot"
 
 echo "==> Installing systemd service..."
