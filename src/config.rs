@@ -134,16 +134,16 @@ impl Config {
             scalper_max_vol_24h: env_or("POLYBOT_SCALPER_MAX_VOL_24H", "250000.0").parse()?,
             scalper_refresh_secs: env_or("POLYBOT_SCALPER_REFRESH_SECS", "15").parse()?,
             scalper_reprice_ticks: env_or("POLYBOT_SCALPER_REPRICE_TICKS", "1").parse()?,
-            scalper_small_max_markets: env_or("POLYBOT_SCALPER_SMALL_MAX_MARKETS", "6").parse()?,
+            scalper_small_max_markets: env_or("POLYBOT_SCALPER_SMALL_MAX_MARKETS", "3").parse()?,
             unwind_stage1_secs: env_or("POLYBOT_UNWIND_STAGE1_SECS", "60").parse()?,
             unwind_stage2_secs: env_or("POLYBOT_UNWIND_STAGE2_SECS", "90").parse()?,
             unwind_hard_stop_secs: env_or("POLYBOT_UNWIND_HARD_STOP_SECS", "120").parse()?,
             unwind_cooldown_secs: env_or("POLYBOT_UNWIND_COOLDOWN_SECS", "900").parse()?,
             decay_enabled: env_or("POLYBOT_DECAY_ENABLED", "true").parse()?,
-            decay_min_price: env_or("POLYBOT_DECAY_MIN_PRICE", "0.93").parse()?,
-            decay_max_bet_usdc: env_or("POLYBOT_DECAY_MAX_BET_USDC", "2.0").parse()?,
-            decay_window_hours: env_or("POLYBOT_DECAY_WINDOW_HOURS", "24.0").parse()?,
-            decay_nav_fraction: env_or("POLYBOT_DECAY_NAV_FRACTION", "0.50").parse()?,
+            decay_min_price: env_or("POLYBOT_DECAY_MIN_PRICE", "0.90").parse()?,
+            decay_max_bet_usdc: env_or("POLYBOT_DECAY_MAX_BET_USDC", "5.0").parse()?,
+            decay_window_hours: env_or("POLYBOT_DECAY_WINDOW_HOURS", "48.0").parse()?,
+            decay_nav_fraction: env_or("POLYBOT_DECAY_NAV_FRACTION", "0.70").parse()?,
             decay_excluded_tags: env_or(
                 "POLYBOT_DECAY_EXCLUDED_TAGS",
                 "crypto,sports,bitcoin,ethereum,btc,eth",
@@ -194,14 +194,14 @@ impl Config {
         }
     }
 
-    /// Max markets to actively quote given NAV — avoids spreading too thin.
+    /// Max reward markets to actively quote given NAV — avoids spreading too thin.
     pub fn max_active_markets(&self) -> usize {
         if self.nav_usdc < 100.0 {
-            5
+            3
         } else if self.nav_usdc < 250.0 {
-            10
+            5
         } else if self.nav_usdc < 1000.0 {
-            25
+            15
         } else {
             usize::MAX // no limit
         }
@@ -256,16 +256,16 @@ pub fn test_config() -> Config {
         scalper_max_vol_24h: 250_000.0,
         scalper_refresh_secs: 15,
         scalper_reprice_ticks: 1,
-        scalper_small_max_markets: 6,
+        scalper_small_max_markets: 3,
         unwind_stage1_secs: 60,
         unwind_stage2_secs: 90,
         unwind_hard_stop_secs: 120,
         unwind_cooldown_secs: 900,
         decay_enabled: true,
-        decay_min_price: 0.93,
-        decay_max_bet_usdc: 2.0,
-        decay_window_hours: 24.0,
-        decay_nav_fraction: 0.50,
+        decay_min_price: 0.90,
+        decay_max_bet_usdc: 5.0,
+        decay_window_hours: 48.0,
+        decay_nav_fraction: 0.70,
         decay_excluded_tags: vec![
             "crypto".into(), "sports".into(), "bitcoin".into(),
             "ethereum".into(), "btc".into(), "eth".into(),
@@ -362,7 +362,7 @@ pub(crate) mod tests {
         assert_eq!(cfg.effective_max_notional_per_market(), 0.08);
         assert_eq!(cfg.effective_max_one_sided_inventory(), 0.06);
         assert_eq!(cfg.effective_max_gross_exposure(), 0.40);
-        assert_eq!(cfg.max_active_markets(), 10);
+        assert_eq!(cfg.max_active_markets(), 5);
     }
 
     #[test]
@@ -379,11 +379,11 @@ pub(crate) mod tests {
     fn max_active_markets_tiers() {
         let mut cfg = test_config();
         cfg.nav_usdc = 50.0;
-        assert_eq!(cfg.max_active_markets(), 5);
+        assert_eq!(cfg.max_active_markets(), 3);
         cfg.nav_usdc = 200.0;
-        assert_eq!(cfg.max_active_markets(), 10);
+        assert_eq!(cfg.max_active_markets(), 5);
         cfg.nav_usdc = 500.0;
-        assert_eq!(cfg.max_active_markets(), 25);
+        assert_eq!(cfg.max_active_markets(), 15);
         cfg.nav_usdc = 5000.0;
         assert_eq!(cfg.max_active_markets(), usize::MAX);
     }

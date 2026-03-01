@@ -1,7 +1,7 @@
 //! Late-stage time-decay strategy ("Penny Collector").
 //!
 //! Scans for binary markets resolving within a configurable window (default 24h)
-//! where one outcome trades at >= min_price (default 0.93). Buys shares via IOC
+//! where one outcome trades at >= min_price (default 0.90). Buys shares via IOC
 //! and holds to resolution. Strict per-market and total capital limits.
 
 use chrono::{DateTime, Utc};
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn scan_skips_market_outside_window() {
         let now = Utc::now();
-        let end = now + ChronoDuration::hours(48); // beyond 24h window
+        let end = now + ChronoDuration::hours(72); // beyond 48h window
         let market = make_market("c1", Some(end), make_tokens("0.95", "0.05"), vec![], false);
         let books = make_books_with_ask("tok_yes", dec!(0.95));
         let config = test_config();
@@ -423,9 +423,9 @@ mod tests {
         };
 
         let intent = evaluate_decay_buy(&candidate, &config, &tracker).unwrap();
-        // $2 / $0.95 = 2.10 shares (rounded down to 2.10)
-        assert!(intent.size <= dec!(2.11));
-        assert!(intent.size >= dec!(2.0));
+        // $5 / $0.95 = 5.26 shares (rounded down to 5.26)
+        assert!(intent.size <= dec!(5.27));
+        assert!(intent.size >= dec!(5.0));
         assert_eq!(intent.order_type, OrderType::FOK);
     }
 
