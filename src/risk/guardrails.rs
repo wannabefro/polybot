@@ -278,6 +278,18 @@ impl RiskEngine {
         self.token_inventory.read().clone()
     }
 
+    /// Seed inventory from existing on-chain positions (startup bootstrap).
+    /// This lets position recon pass on first tick instead of halting on
+    /// pre-existing positions the bot didn't place this session.
+    pub fn seed_inventory(&self, positions: &HashMap<String, Decimal>) {
+        let mut inv = self.token_inventory.write();
+        for (token_id, size) in positions {
+            if !size.is_zero() {
+                inv.insert(token_id.clone(), *size);
+            }
+        }
+    }
+
     /// Recalculate risk limits for a new NAV value.
     ///
     /// Called when the live NAV tracker detects a balance change.

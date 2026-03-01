@@ -375,6 +375,25 @@ async fn main() -> Result<()> {
 
     // ── Phase 4: Risk + intelligence ───────────────────────────
     let risk_engine = RiskEngine::new(cfg.clone());
+
+    // Bootstrap risk engine with existing on-chain positions so
+    // position recon doesn't halt on pre-existing inventory.
+    {
+        let address = format!("{:#x}", auth_ctx.signer.address());
+        match risk::position::fetch_remote_positions(&address).await {
+            Ok(positions) if !positions.is_empty() => {
+                info!(
+                    count = positions.len(),
+                    "startup: seeding risk engine with {} existing positions",
+                    positions.len()
+                );
+                risk_engine.seed_inventory(&positions);
+            }
+            Ok(_) => info!("startup: no existing positions found"),
+            Err(e) => warn!(err = %e, "startup: could not fetch positions — recon may halt"),
+        }
+    }
+
     let rate_limiter = risk::rate_limit::RateLimiter::new(cfg.rate_limit_per_sec);
     let heartbeat = order::heartbeat::HeartbeatMonitor::new(cfg.heartbeat_interval);
 

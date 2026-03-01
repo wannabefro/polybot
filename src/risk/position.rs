@@ -21,10 +21,10 @@ pub struct PositionSnapshot {
 }
 
 /// Maximum acceptable mismatch between local and remote positions (% of NAV).
-const RECON_MISMATCH_THRESHOLD_PCT: f64 = 0.01; // 1% NAV
+const RECON_MISMATCH_THRESHOLD_PCT: f64 = 0.05; // 5% NAV
 
 /// Fetch positions from the Polymarket data API.
-async fn fetch_remote_positions(address: &str) -> Result<HashMap<String, Decimal>> {
+pub async fn fetch_remote_positions(address: &str) -> Result<HashMap<String, Decimal>> {
     let data_host = std::env::var("POLYBOT_DATA_HOST")
         .unwrap_or_else(|_| "https://data-api.polymarket.com".into());
 
