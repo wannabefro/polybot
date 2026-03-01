@@ -1,6 +1,6 @@
 
 use anyhow::Result;
-use polymarket_client_sdk::clob::types::{OrderType, Side};
+use polymarket_client_sdk::clob::types::{Amount, OrderType, Side};
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -52,16 +52,38 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
     let fee_bps_u32 = intent.fee_rate_bps.to_u32().unwrap_or(0);
     client.set_fee_rate_bps(token_id, fee_bps_u32);
 
-    let signable = client
-        .limit_order()
-        .token_id(token_id)
-        .side(intent.side)
-        .price(intent.price)
-        .size(intent.size.trunc_with_scale(2)) // max 2 decimal places (lot size)
-        .order_type(intent.order_type.clone())
-        .post_only(intent.post_only)
-        .build()
-        .await?;
+    // FOK/FAK orders use the market order builder with explicit USDC amount
+    // to avoid maker_amount precision issues (CLOB requires ≤ 2dp for USDC).
+    // GTC/GTD orders use the limit order builder.
+    let signable = if matches!(intent.order_type, OrderType::FOK | OrderType::FAK) {
+        let amount = match intent.side {
+            Side::Buy => {
+                let cost = (intent.size * intent.price).trunc_with_scale(2);
+                Amount::usdc(cost)?
+            }
+            _ => Amount::shares(intent.size.trunc_with_scale(2))?,
+        };
+        client
+            .market_order()
+            .token_id(token_id)
+            .side(intent.side)
+            .price(intent.price)
+            .amount(amount)
+            .order_type(intent.order_type.clone())
+            .build()
+            .await?
+    } else {
+        client
+            .limit_order()
+            .token_id(token_id)
+            .side(intent.side)
+            .price(intent.price)
+            .size(intent.size.trunc_with_scale(2)) // max 2 decimal places (lot size)
+            .order_type(intent.order_type.clone())
+            .post_only(intent.post_only)
+            .build()
+            .await?
+    };
 
     let signed = client.sign(&*ctx.signer, signable).await?;
     let resp = client.post_order(signed).await?;

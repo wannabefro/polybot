@@ -1124,15 +1124,17 @@ async fn main() -> Result<()> {
 
                     let mut decay_buys = 0u32;
                     for candidate in &candidates {
-                        if rate_limiter.try_acquire().is_err() {
-                            break;
-                        }
+                        // Note: no rate-limiter gate here — decay places at most 5
+                        // FOK orders per minute which is negligible API load.
                         let Some(intent) = strategy::decay::evaluate_decay_buy(
                             candidate, &cfg, &decay_tracker,
                         ) else {
                             debug!(
                                 condition_id = %candidate.condition_id,
-                                "decay: evaluate returned None (budget/dup/sizing)"
+                                price = %candidate.price,
+                                available = %candidate.available_size,
+                                min_order = %candidate.min_order_size,
+                                "decay: evaluate returned None"
                             );
                             continue;
                         };

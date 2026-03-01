@@ -185,11 +185,16 @@ pub fn scan_candidates(
             continue;
         }
 
-        // Sum available liquidity at or below the best ask price
-        let available_size: Decimal = book.asks.levels.iter()
-            .take_while(|l| l.price <= best_ask)
-            .map(|l| l.size)
-            .sum();
+        // Sum available liquidity across ask levels up to best_ask + 2 ticks.
+        // For decay, we're willing to pay slightly above best ask to ensure fill.
+        let sweep_ceiling = (best_ask + dec!(0.02)).min(Decimal::ONE);
+        let mut sweep_size = Decimal::ZERO;
+        let mut worst_price = best_ask;
+        for level in &book.asks.levels {
+            if level.price > sweep_ceiling { break; }
+            sweep_size += level.size;
+            worst_price = level.price;
+        }
 
         let hours_to_end = secs_remaining as f64 / 3600.0;
 
@@ -197,12 +202,12 @@ pub fn scan_candidates(
             condition_id: market.condition_id.clone(),
             token_id: token.token_id.clone(),
             outcome: token.outcome.clone(),
-            price: best_ask,
+            price: worst_price,
             hours_to_end,
             neg_risk: market.neg_risk,
             fee_rate_bps: market.maker_fee_bps,
             min_order_size: market.min_order_size,
-            available_size,
+            available_size: sweep_size,
         });
     }
 
@@ -252,13 +257,13 @@ pub fn evaluate_decay_buy(
     let deployed = tracker.deployed_capital();
     let remaining_budget = nav_cap - deployed;
     if remaining_budget <= Decimal::ZERO {
-        debug!(deployed = %deployed, nav_cap = %nav_cap, "decay: capital budget exhausted");
+        info!(deployed = %deployed, nav_cap = %nav_cap, "decay: skip — capital budget exhausted");
         return None;
     }
 
     // Already have a position in this market?
     if tracker.positions.contains_key(&candidate.condition_id) {
-        debug!(condition_id = %candidate.condition_id, "decay: skip duplicate position");
+        debug!(condition_id = %candidate.condition_id, "decay: skip — duplicate position");
         return None;
     }
 
