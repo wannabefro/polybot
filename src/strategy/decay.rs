@@ -104,6 +104,8 @@ pub struct DecayCandidate {
     pub neg_risk: bool,
     pub fee_rate_bps: Decimal,
     pub min_order_size: Decimal,
+    /// Total size available at or below the candidate price (sum of ask levels ≤ price).
+    pub available_size: Decimal,
 }
 
 /// Scan tradable markets for decay candidates.
@@ -183,6 +185,12 @@ pub fn scan_candidates(
             continue;
         }
 
+        // Sum available liquidity at or below the best ask price
+        let available_size: Decimal = book.asks.levels.iter()
+            .take_while(|l| l.price <= best_ask)
+            .map(|l| l.size)
+            .sum();
+
         let hours_to_end = secs_remaining as f64 / 3600.0;
 
         candidates.push(DecayCandidate {
@@ -194,6 +202,7 @@ pub fn scan_candidates(
             neg_risk: market.neg_risk,
             fee_rate_bps: market.maker_fee_bps,
             min_order_size: market.min_order_size,
+            available_size,
         });
     }
 
@@ -256,8 +265,10 @@ pub fn evaluate_decay_buy(
     // Per-market cap
     let usdc_to_spend = max_bet.min(remaining_budget);
 
-    // Calculate size: spend / price (how many shares we get)
-    let size = (usdc_to_spend / candidate.price)
+    // Calculate size: spend / price, capped by available liquidity
+    let desired_size = (usdc_to_spend / candidate.price)
+        .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
+    let size = desired_size.min(candidate.available_size)
         .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
 
     if size < candidate.min_order_size || size <= Decimal::ZERO {
@@ -277,6 +288,7 @@ pub fn evaluate_decay_buy(
         outcome = %candidate.outcome,
         price = %candidate.price,
         size = %size,
+        available = %candidate.available_size,
         hours_to_end = candidate.hours_to_end,
         "decay: placing FOK buy"
     );
@@ -467,6 +479,7 @@ mod tests {
             neg_risk: false,
             fee_rate_bps: dec!(0),
             min_order_size: dec!(1.0),
+            available_size: dec!(100),
         };
 
         let intent = evaluate_decay_buy(&candidate, &config, &tracker).unwrap();
@@ -491,6 +504,7 @@ mod tests {
             neg_risk: false,
             fee_rate_bps: dec!(0),
             min_order_size: dec!(1.0),
+            available_size: dec!(100),
         };
 
         assert!(evaluate_decay_buy(&candidate, &config, &tracker).is_none());
@@ -516,6 +530,46 @@ mod tests {
             neg_risk: false,
             fee_rate_bps: dec!(0),
             min_order_size: dec!(1.0),
+            available_size: dec!(100),
+        };
+
+        assert!(evaluate_decay_buy(&candidate, &config, &tracker).is_none());
+    }
+
+    #[test]
+    fn evaluate_caps_size_to_available_liquidity() {
+        let config = test_config();
+        let tracker = DecayTracker::new();
+        let candidate = DecayCandidate {
+            condition_id: "c1".to_string(),
+            token_id: "tok_yes".to_string(),
+            outcome: "Yes".to_string(),
+            price: dec!(0.95),
+            hours_to_end: 12.0,
+            neg_risk: false,
+            fee_rate_bps: dec!(0),
+            min_order_size: dec!(1.0),
+            available_size: dec!(5), // only 5 shares at best ask
+        };
+
+        let intent = evaluate_decay_buy(&candidate, &config, &tracker).unwrap();
+        assert_eq!(intent.size, dec!(5)); // capped to available
+    }
+
+    #[test]
+    fn evaluate_skips_when_available_below_min_order() {
+        let config = test_config();
+        let tracker = DecayTracker::new();
+        let candidate = DecayCandidate {
+            condition_id: "c1".to_string(),
+            token_id: "tok_yes".to_string(),
+            outcome: "Yes".to_string(),
+            price: dec!(0.95),
+            hours_to_end: 12.0,
+            neg_risk: false,
+            fee_rate_bps: dec!(0),
+            min_order_size: dec!(15.0),
+            available_size: dec!(3), // only 3 shares, min is 15
         };
 
         assert!(evaluate_decay_buy(&candidate, &config, &tracker).is_none());
