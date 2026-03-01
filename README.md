@@ -74,10 +74,9 @@ journalctl -u polybot -f        # tail logs
 If running from a region blocked by Polymarket, configure a SOCKS5 proxy in `.env`:
 
 ```bash
-NORDVPN_USER=your_service_username
-NORDVPN_PASS=your_service_password
+NORDVPN_USERNAME=your_service_username
+NORDVPN_PASSWORD=your_service_password
 NORDVPN_HOST=se.socks.nordhold.net   # Sweden — Finland also works
-NORDVPN_PORT=1080
 ```
 
 The bot sets `ALL_PROXY` before creating HTTP clients. All REST API traffic routes through the proxy. WebSocket connections are direct (not geo-blocked).
