@@ -10,6 +10,9 @@ pub struct Config {
     pub gamma_host: String,
     pub chain_id: u64,
 
+    // ── SOCKS5 proxy (optional) ──
+    pub socks5_proxy: Option<String>,
+
     // ── Auth ──
     pub private_key: String,
 
@@ -152,6 +155,17 @@ impl Config {
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect(),
+            socks5_proxy: {
+                let host = std::env::var("NORDVPN_HOST").ok();
+                let user = std::env::var("NORDVPN_USERNAME").ok();
+                let pass = std::env::var("NORDVPN_PASSWORD").ok();
+                match (host, user, pass) {
+                    (Some(h), Some(u), Some(p)) => {
+                        Some(format!("socks5://{u}:{p}@{h}:1080"))
+                    }
+                    _ => std::env::var("POLYBOT_SOCKS5_PROXY").ok(),
+                }
+            },
         })
     }
 
@@ -270,6 +284,7 @@ pub fn test_config() -> Config {
             "crypto".into(), "sports".into(), "bitcoin".into(),
             "ethereum".into(), "btc".into(), "eth".into(),
         ],
+        socks5_proxy: None,
     }
 }
 

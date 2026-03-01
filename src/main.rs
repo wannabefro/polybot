@@ -359,6 +359,18 @@ async fn main() -> Result<()> {
 
     // ── Phase 1: Config + compliance gate ──────────────────────
     let cfg = config::Config::from_env()?;
+
+    // Set SOCKS5 proxy env var so all reqwest clients (ours + SDK) use it.
+    if let Some(ref proxy_url) = cfg.socks5_proxy {
+        std::env::set_var("ALL_PROXY", proxy_url);
+        // Redact password in log
+        let redacted = proxy_url
+            .find('@')
+            .map(|i| format!("socks5://***@{}", &proxy_url[i + 1..]))
+            .unwrap_or_else(|| proxy_url.clone());
+        info!(proxy = %redacted, "socks5: proxy configured for all HTTP requests");
+    }
+
     geoblock::check_or_abort().await?;
     let (_geo_handle, mut geo_rx) = geoblock::spawn_monitor(&cfg);
 
