@@ -1143,6 +1143,13 @@ async fn main() -> Result<()> {
                                         hours_to_end = candidate.hours_to_end,
                                         "🕐 decay: bought shares"
                                     );
+                                } else {
+                                    info!(
+                                        outcome = %candidate.outcome,
+                                        price = %intent.price,
+                                        size = %intent.size,
+                                        "🕐 decay: FOK not filled (no liquidity at price)"
+                                    );
                                 }
                             }
                             Err(e) => {

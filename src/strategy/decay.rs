@@ -198,7 +198,7 @@ pub fn scan_candidates(
     }
 
     if candidates.is_empty() && !markets.is_empty() {
-        debug!(
+        info!(
             total = markets.len(),
             skip_non_binary,
             skip_no_end_date,
@@ -209,7 +209,18 @@ pub fn scan_candidates(
             skip_no_ask,
             min_price = %min_price,
             window_hours = config.decay_window_hours,
-            "decay: no candidates found — filter breakdown"
+            "🔍 decay: no candidates — filter breakdown"
+        );
+    } else if !candidates.is_empty() {
+        info!(
+            found = candidates.len(),
+            total = markets.len(),
+            skip_no_end_date,
+            skip_outside_window,
+            skip_low_price,
+            best_price = %candidates[0].price,
+            best_hours = format!("{:.1}", candidates[0].hours_to_end),
+            "🔍 decay: candidates found"
         );
     }
 
