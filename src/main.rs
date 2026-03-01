@@ -89,6 +89,7 @@ fn process_fill(
         );
 
         if needs_hedge {
+            info!("⏱️ fill needs hedge — will unwind in 2min if complement doesn't fill");
             hedge_tracker.record_fill(UnhedgedFill {
                 token_id: fill.token_id.clone(),
                 condition_id: condition_id.to_string(),
@@ -115,6 +116,7 @@ fn process_fill(
         info!("💰 FILL {} {} @ ${} (${:.2})", side_str, size, intent.price, notional);
 
         if needs_hedge {
+            info!("⏱️ fill needs hedge — will unwind in 2min if complement doesn't fill");
             let price = if !size.is_zero() { notional / size } else { intent.price };
             hedge_tracker.record_fill(UnhedgedFill {
                 token_id: intent.token_id.clone(),
@@ -375,8 +377,8 @@ async fn main() -> Result<()> {
                 }
 
                 // Unwind expired single-sided fills (complement didn't fill in time)
-                // First 5 attempts use FOK; after that switch to GTC limit sell
-                for unwind in hedge_tracker.expired_unwinds(&books, 5) {
+                // First 3 attempts use FOK; after that switch to GTC limit sell
+                for unwind in hedge_tracker.expired_unwinds(&books, 3) {
                     let mode = if unwind.order_type == polymarket_client_sdk::clob::types::OrderType::GTC { "GTC" } else { "FOK" };
                     info!(
                         "⚠️ UNWIND ({}) {} {} @ ${} — complement didn't fill",
