@@ -137,8 +137,8 @@ async fn risk_daily_loss_rejects_orders() {
     let cfg = test_config();
     let risk = RiskEngine::new(cfg.clone());
 
-    // Simulate 3.1% NAV loss (NAV=10000, loss=310)
-    risk.record_pnl(dec!(-310));
+    // Simulate 5.1% NAV loss (NAV=10000, loss=510)
+    risk.record_pnl(dec!(-510));
 
     // Orders should be rejected by the daily-loss check
     let intent = OrderIntent {
@@ -187,7 +187,7 @@ async fn risk_daily_reset_clears_loss() {
     let cfg = test_config();
     let risk = RiskEngine::new(cfg.clone());
 
-    risk.record_pnl(dec!(-310));
+    risk.record_pnl(dec!(-510));
 
     // Should reject
     let intent = OrderIntent {
@@ -444,11 +444,11 @@ async fn one_sided_inventory_blocks_excessive_exposure() {
     let cfg = test_config();
     let risk = RiskEngine::new(cfg.clone());
 
-    // max_one_sided_inventory = 0.01 → 1% of 10000 = 100 USDC
-    // Record buy 200 shares at some implied price
-    risk.record_fill("cond1", "token_yes", Side::Buy, Decimal::from(200), Decimal::from(100));
+    // max_one_sided_inventory = 0.04 → 4% of 10000 = 400 USDC
+    // Record buy 400 shares at 0.50 = 200 notional (at per-market limit of 2%=200)
+    risk.record_fill("cond1", "token_yes", Side::Buy, Decimal::from(400), Decimal::from(200));
 
-    // Further buying should be blocked (200 shares * 0.50 = 100 notional = at limit)
+    // Further buying should be blocked (at per-market limit)
     let intent = OrderIntent {
         token_id: "token_yes".into(),
         side: Side::Buy,

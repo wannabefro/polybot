@@ -383,7 +383,8 @@ mod tests {
     #[test]
     fn daily_loss_stop() {
         let engine = RiskEngine::new(test_config());
-        engine.record_pnl(Decimal::from(-301));
+        // 5% of 10000 = 500
+        engine.record_pnl(Decimal::from(-501));
         let verdict = engine.check("cond1", &test_intent(0.50, 1.0));
         assert!(matches!(verdict, RiskVerdict::Rejected(_)));
     }
@@ -391,8 +392,8 @@ mod tests {
     #[test]
     fn gross_exposure_limit() {
         let engine = RiskEngine::new(test_config());
-        for i in 0..12 {
-            // Use different tokens so inventory doesn't accumulate on one
+        // 50% of 10000 = 5000; 25 markets × 200 = 5000
+        for i in 0..25 {
             engine.record_fill(&format!("cond{i}"), &format!("t{i}"), Side::Buy, Decimal::from(5), Decimal::from(200));
         }
         let verdict = engine.check("cond_new", &test_intent(1.0, 200.0));
@@ -411,8 +412,9 @@ mod tests {
     #[test]
     fn daily_pnl_accumulates() {
         let engine = RiskEngine::new(test_config());
-        engine.record_pnl(Decimal::from(-100));
-        engine.record_pnl(Decimal::from(-100));
+        // 5% of 10000 = 500
+        engine.record_pnl(Decimal::from(-200));
+        engine.record_pnl(Decimal::from(-200));
         let verdict = engine.check("cond1", &test_intent(0.50, 1.0));
         assert!(matches!(verdict, RiskVerdict::Approved));
 
@@ -424,7 +426,7 @@ mod tests {
     #[test]
     fn reset_daily_clears_pnl() {
         let engine = RiskEngine::new(test_config());
-        engine.record_pnl(Decimal::from(-301));
+        engine.record_pnl(Decimal::from(-501));
         assert!(matches!(
             engine.check("cond1", &test_intent(0.50, 1.0)),
             RiskVerdict::Rejected(_)
@@ -457,10 +459,10 @@ mod tests {
     #[test]
     fn one_sided_inventory_buy_limit() {
         let engine = RiskEngine::new(test_config());
-        // max_one_sided_inventory = 0.01 → 1% of 10000 = 100 USDC
-        // Buy 200 shares at 0.50 = 100 notional inventory
-        engine.record_fill("cond1", "token1", Side::Buy, Decimal::from(200), Decimal::from(100));
-        // Another buy of 10 at 0.50 would push inventory to 105 > 100
+        // max_one_sided_inventory = 0.04 → 4% of 10000 = 400 USDC
+        // Buy 800 shares at 0.50 = 400 notional inventory
+        engine.record_fill("cond1", "token1", Side::Buy, Decimal::from(800), Decimal::from(400));
+        // Another buy of 10 at 0.50 would push inventory to 405 > 400
         let intent = OrderIntent {
             token_id: "token1".into(),
             side: Side::Buy,
@@ -478,8 +480,8 @@ mod tests {
     #[test]
     fn one_sided_inventory_sell_reduces() {
         let engine = RiskEngine::new(test_config());
-        // Long 200 shares
-        engine.record_fill("cond1", "token1", Side::Buy, Decimal::from(200), Decimal::from(100));
+        // Long 300 shares at 0.50 = 150 notional (under per-market limit of 200)
+        engine.record_fill("cond1", "token1", Side::Buy, Decimal::from(300), Decimal::from(150));
         // Selling reduces inventory — should pass
         let intent = sell_intent("token1", 0.50, 100.0);
         let verdict = engine.check("cond1", &intent);
@@ -489,8 +491,8 @@ mod tests {
     #[test]
     fn one_sided_inventory_short_limit() {
         let engine = RiskEngine::new(test_config());
-        // Short 200 shares at 0.50 = 100 notional
-        engine.record_fill("cond1", "token1", Side::Sell, Decimal::from(200), Decimal::from(100));
+        // Short 800 shares at 0.50 = 400 notional
+        engine.record_fill("cond1", "token1", Side::Sell, Decimal::from(800), Decimal::from(400));
         // More selling would push past limit
         let intent = sell_intent("token1", 0.50, 10.0);
         let verdict = engine.check("cond1", &intent);
@@ -516,8 +518,8 @@ mod tests {
     fn gross_derisking_order_is_allowed_near_limit() {
         let engine = RiskEngine::new(test_config());
 
-        // Gross exposure at 2450 (limit is 2500): twelve markets at +200 and one at +50.
-        for i in 0..12 {
+        // Gross exposure at 4850 (limit is 5000): 24 markets at +200 and one at +50.
+        for i in 0..24 {
             engine.record_fill(
                 &format!("cond{i}"),
                 &format!("token{i}"),
@@ -697,7 +699,7 @@ mod tests {
     #[test]
     fn set_daily_pnl_enforces_loss_stop() {
         let engine = RiskEngine::new(test_config());
-        engine.set_daily_pnl(Decimal::from(-500)); // below 3% stop on 10k NAV
+        engine.set_daily_pnl(Decimal::from(-501)); // below 5% stop on 10k NAV
         let verdict = engine.check("cond1", &test_intent(0.50, 1.0));
         assert!(matches!(verdict, RiskVerdict::Rejected(_)));
     }

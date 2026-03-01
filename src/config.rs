@@ -85,9 +85,9 @@ impl Config {
             paper_mode: env_or("POLYBOT_PAPER_MODE", "true").parse()?,
             nav_usdc: env_or("POLYBOT_NAV_USDC", "1000.0").parse()?,
             max_notional_per_market: env_or("POLYBOT_MAX_NOTIONAL_PCT", "0.02").parse()?,
-            max_gross_exposure: env_or("POLYBOT_MAX_GROSS_PCT", "0.25").parse()?,
-            max_one_sided_inventory: env_or("POLYBOT_MAX_INVENTORY_PCT", "0.01").parse()?,
-            daily_loss_stop: env_or("POLYBOT_DAILY_LOSS_PCT", "0.03").parse()?,
+            max_gross_exposure: env_or("POLYBOT_MAX_GROSS_PCT", "0.50").parse()?,
+            max_one_sided_inventory: env_or("POLYBOT_MAX_INVENTORY_PCT", "0.04").parse()?,
+            daily_loss_stop: env_or("POLYBOT_DAILY_LOSS_PCT", "0.05").parse()?,
             heartbeat_interval: Duration::from_secs(
                 env_or("POLYBOT_HEARTBEAT_SECS", "5").parse()?,
             ),
@@ -120,8 +120,8 @@ impl Config {
             reward_min_nav_usdc: env_or("POLYBOT_REWARD_MIN_NAV_USDC", "25.0").parse()?,
             mean_revert_min_nav_usdc: env_or("POLYBOT_MR_MIN_NAV_USDC", "100.0").parse()?,
             small_account_nav_threshold: env_or("POLYBOT_SMALL_ACCOUNT_NAV_THRESHOLD", "500.0").parse()?,
-            small_account_min_per_market_pct: env_or("POLYBOT_SMALL_MIN_PER_MARKET_PCT", "0.08").parse()?,
-            small_account_min_inventory_pct: env_or("POLYBOT_SMALL_MIN_INVENTORY_PCT", "0.06").parse()?,
+            small_account_min_per_market_pct: env_or("POLYBOT_SMALL_MIN_PER_MARKET_PCT", "0.12").parse()?,
+            small_account_min_inventory_pct: env_or("POLYBOT_SMALL_MIN_INVENTORY_PCT", "0.10").parse()?,
             neg_risk_stale_secs: env_or("POLYBOT_NR_STALE_SECS", "10").parse()?,
             quote_tick_secs: env_or("POLYBOT_QUOTE_TICK_SECS", "10").parse()?,
             quote_max_age: Duration::from_secs(
@@ -141,7 +141,7 @@ impl Config {
             unwind_cooldown_secs: env_or("POLYBOT_UNWIND_COOLDOWN_SECS", "900").parse()?,
             decay_enabled: env_or("POLYBOT_DECAY_ENABLED", "true").parse()?,
             decay_min_price: env_or("POLYBOT_DECAY_MIN_PRICE", "0.85").parse()?,
-            decay_max_bet_usdc: env_or("POLYBOT_DECAY_MAX_BET_USDC", "5.0").parse()?,
+            decay_max_bet_usdc: env_or("POLYBOT_DECAY_MAX_BET_USDC", "10.0").parse()?,
             decay_window_hours: env_or("POLYBOT_DECAY_WINDOW_HOURS", "72.0").parse()?,
             decay_nav_fraction: env_or("POLYBOT_DECAY_NAV_FRACTION", "0.70").parse()?,
             decay_excluded_tags: env_or(
@@ -225,9 +225,9 @@ pub fn test_config() -> Config {
         paper_mode: true,
         nav_usdc: 10_000.0,
         max_notional_per_market: 0.02,
-        max_gross_exposure: 0.25,
-        max_one_sided_inventory: 0.01,
-        daily_loss_stop: 0.03,
+        max_gross_exposure: 0.50,
+        max_one_sided_inventory: 0.04,
+        daily_loss_stop: 0.05,
         heartbeat_interval: Duration::from_secs(5),
         geoblock_poll_interval: Duration::from_secs(900),
         discovery_interval: Duration::from_secs(60),
@@ -244,8 +244,8 @@ pub fn test_config() -> Config {
         reward_min_nav_usdc: 25.0,
         mean_revert_min_nav_usdc: 100.0,
         small_account_nav_threshold: 500.0,
-        small_account_min_per_market_pct: 0.08,
-        small_account_min_inventory_pct: 0.06,
+        small_account_min_per_market_pct: 0.12,
+        small_account_min_inventory_pct: 0.10,
         neg_risk_stale_secs: 10,
         quote_tick_secs: 10,
         quote_max_age: Duration::from_secs(20),
@@ -263,7 +263,7 @@ pub fn test_config() -> Config {
         unwind_cooldown_secs: 900,
         decay_enabled: true,
         decay_min_price: 0.85,
-        decay_max_bet_usdc: 5.0,
+        decay_max_bet_usdc: 10.0,
         decay_window_hours: 72.0,
         decay_nav_fraction: 0.70,
         decay_excluded_tags: vec![
@@ -348,9 +348,9 @@ pub(crate) mod tests {
     fn default_risk_limits_match_plan() {
         let cfg = test_config();
         assert_eq!(cfg.max_notional_per_market, 0.02); // 2%
-        assert_eq!(cfg.max_gross_exposure, 0.25);       // 25%
-        assert_eq!(cfg.max_one_sided_inventory, 0.01);  // 1%
-        assert_eq!(cfg.daily_loss_stop, 0.03);           // 3%
+        assert_eq!(cfg.max_gross_exposure, 0.50);       // 50%
+        assert_eq!(cfg.max_one_sided_inventory, 0.04);  // 4%
+        assert_eq!(cfg.daily_loss_stop, 0.05);           // 5%
         assert_eq!(cfg.mean_revert_max_nav_frac, 0.005); // 0.5%
     }
 
@@ -359,9 +359,9 @@ pub(crate) mod tests {
         let mut cfg = test_config();
         cfg.nav_usdc = 100.0;
         assert!(cfg.is_small_account());
-        assert_eq!(cfg.effective_max_notional_per_market(), 0.08);
-        assert_eq!(cfg.effective_max_one_sided_inventory(), 0.06);
-        assert_eq!(cfg.effective_max_gross_exposure(), 0.40);
+        assert_eq!(cfg.effective_max_notional_per_market(), 0.12);
+        assert_eq!(cfg.effective_max_one_sided_inventory(), 0.10);
+        assert_eq!(cfg.effective_max_gross_exposure(), 0.50);
         assert_eq!(cfg.max_active_markets(), 5);
     }
 

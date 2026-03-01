@@ -423,9 +423,9 @@ mod tests {
         };
 
         let intent = evaluate_decay_buy(&candidate, &config, &tracker).unwrap();
-        // $5 / $0.95 = 5.26 shares (rounded down to 5.26)
-        assert!(intent.size <= dec!(5.27));
-        assert!(intent.size >= dec!(5.0));
+        // $10 / $0.95 = 10.52 shares (rounded down to 10.52)
+        assert!(intent.size <= dec!(10.53));
+        assert!(intent.size >= dec!(10.0));
         assert_eq!(intent.order_type, OrderType::FOK);
     }
 
