@@ -59,9 +59,18 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
         let amount = match intent.side {
             Side::Buy => {
                 let cost = (intent.size * intent.price).trunc_with_scale(2);
+                if cost <= rust_decimal::Decimal::ZERO {
+                    anyhow::bail!("FOK buy cost rounds to $0 — size={} price={}", intent.size, intent.price);
+                }
                 Amount::usdc(cost)?
             }
-            _ => Amount::shares(intent.size.trunc_with_scale(2))?,
+            _ => {
+                let shares = intent.size.trunc_with_scale(2);
+                if shares <= rust_decimal::Decimal::ZERO {
+                    anyhow::bail!("FOK sell size rounds to 0 — size={}", intent.size);
+                }
+                Amount::shares(shares)?
+            }
         };
         client
             .market_order()

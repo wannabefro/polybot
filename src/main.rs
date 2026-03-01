@@ -513,9 +513,8 @@ async fn main() -> Result<()> {
             // ── Ctrl-C ──
             _ = tokio::signal::ctrl_c() => {
                 info!("ctrl-c — shutting down");
-                if router.cancel_all().await.is_ok() {
-                    active_quotes.clear();
-                }
+                let _ = router.cancel_all().await;
+                active_quotes.clear();
                 break;
             }
 

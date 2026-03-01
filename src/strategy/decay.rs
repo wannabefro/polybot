@@ -314,7 +314,11 @@ pub fn evaluate_decay_buy(
     let size = desired_size.min(candidate.available_size)
         .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
 
-    if size < candidate.min_order_size || size <= Decimal::ZERO {
+    // Validate both size and USDC cost are above minimums.
+    // Cost truncated to 2dp (CLOB requirement) must also be positive.
+    let cost = (size * candidate.price)
+        .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
+    if size < candidate.min_order_size || size <= Decimal::ZERO || cost <= Decimal::ZERO {
         info!(
             condition_id = %candidate.condition_id,
             size = %size,
