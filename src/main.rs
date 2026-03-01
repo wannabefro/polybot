@@ -453,6 +453,7 @@ async fn main() -> Result<()> {
     let mut active_quotes: HashMap<String, ActiveQuote> = HashMap::new();
     let mut pending_markouts: Vec<PendingMarkout> = Vec::new();
     let mut decay_tracker = strategy::decay::DecayTracker::new();
+    let mut decay_scan_tick = 0u32;
     let mut reward_enabled = cfg.nav_usdc >= cfg.reward_min_nav_usdc;
     let mut mean_revert_enabled = cfg.nav_usdc >= cfg.mean_revert_min_nav_usdc;
     let mut max_markets = cfg.max_active_markets();
@@ -1107,6 +1108,20 @@ async fn main() -> Result<()> {
                     let candidates = strategy::decay::scan_candidates(
                         &universe, &books, &cfg, chrono::Utc::now(),
                     );
+
+                    // Log decay scan summary once per minute (every 6 ticks at 10s)
+                    decay_scan_tick += 1;
+                    if decay_scan_tick % 6 == 1 {
+                        info!(
+                            candidates = candidates.len(),
+                            deployed = %decay_tracker.deployed_capital(),
+                            positions = decay_tracker.position_count(),
+                            best = if candidates.is_empty() { "none".to_string() }
+                                   else { format!("{}@{}", candidates[0].outcome, candidates[0].price) },
+                            "🔍 decay scan"
+                        );
+                    }
+
                     let mut decay_buys = 0u32;
                     for candidate in &candidates {
                         if rate_limiter.try_acquire().is_err() {
@@ -1115,6 +1130,10 @@ async fn main() -> Result<()> {
                         let Some(intent) = strategy::decay::evaluate_decay_buy(
                             candidate, &cfg, &decay_tracker,
                         ) else {
+                            debug!(
+                                condition_id = %candidate.condition_id,
+                                "decay: evaluate returned None (budget/dup/sizing)"
+                            );
                             continue;
                         };
                         match router.place(&intent, &books).await {
@@ -1153,12 +1172,15 @@ async fn main() -> Result<()> {
                                 }
                             }
                             Err(e) => {
-                                let msg = e.to_string();
-                                if is_transient_order_rejection(&msg) {
-                                    debug!(err = %e, "decay place rejected (transient)");
-                                } else {
-                                    error!(err = %e, "decay place failed");
-                                }
+                                // Always log decay errors at info — these are
+                                // actionable (balance, allowance, sizing).
+                                info!(
+                                    err = %e,
+                                    outcome = %candidate.outcome,
+                                    price = %intent.price,
+                                    size = %intent.size,
+                                    "🕐 decay: order rejected"
+                                );
                             }
                         }
                     }

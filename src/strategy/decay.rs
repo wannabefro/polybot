@@ -198,7 +198,7 @@ pub fn scan_candidates(
     }
 
     if candidates.is_empty() && !markets.is_empty() {
-        info!(
+        debug!(
             total = markets.len(),
             skip_non_binary,
             skip_no_end_date,
@@ -212,7 +212,7 @@ pub fn scan_candidates(
             "🔍 decay: no candidates — filter breakdown"
         );
     } else if !candidates.is_empty() {
-        info!(
+        debug!(
             found = candidates.len(),
             total = markets.len(),
             skip_no_end_date,
