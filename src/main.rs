@@ -378,9 +378,18 @@ async fn main() -> Result<()> {
 
     // Bootstrap risk engine with existing on-chain positions so
     // position recon doesn't halt on pre-existing inventory.
+    // Polymarket positions are held by the proxy wallet, not the EOA.
+    let proxy_address = {
+        use polymarket_client_sdk::derive_proxy_wallet;
+        let eoa = auth_ctx.signer.address();
+        let proxy = derive_proxy_wallet(eoa, cfg.chain_id)
+            .map(|a| format!("{:#x}", a))
+            .unwrap_or_else(|| format!("{:#x}", eoa));
+        info!(eoa = %format!("{:#x}", eoa), proxy = %proxy, "startup: derived proxy wallet");
+        proxy
+    };
     {
-        let address = format!("{:#x}", auth_ctx.signer.address());
-        match risk::position::fetch_remote_positions(&address).await {
+        match risk::position::fetch_remote_positions(&proxy_address).await {
             Ok(positions) if !positions.is_empty() => {
                 info!(
                     count = positions.len(),
@@ -456,8 +465,7 @@ async fn main() -> Result<()> {
 
     // Bootstrap decay tracker with on-chain positions to prevent duplicate buys.
     {
-        let address = format!("{:#x}", auth_ctx.signer.address());
-        match risk::position::fetch_remote_positions(&address).await {
+        match risk::position::fetch_remote_positions(&proxy_address).await {
             Ok(ref positions) if !positions.is_empty() => {
                 decay_tracker.seed_held_tokens(positions);
             }
@@ -1137,8 +1145,10 @@ async fn main() -> Result<()> {
                     for candidate in &candidates {
                         // Note: no rate-limiter gate here — decay places at most 5
                         // FOK orders per minute which is negligible API load.
+                        let free_bal = rust_decimal::Decimal::try_from(live_nav)
+                            .unwrap_or(rust_decimal::Decimal::ZERO);
                         let Some(intent) = strategy::decay::evaluate_decay_buy(
-                            candidate, &cfg, &decay_tracker,
+                            candidate, &cfg, &decay_tracker, free_bal,
                         ) else {
                             debug!(
                                 condition_id = %candidate.condition_id,
@@ -1185,8 +1195,7 @@ async fn main() -> Result<()> {
                                 }
                             }
                             Err(e) => {
-                                // Always log decay errors at info — these are
-                                // actionable (balance, allowance, sizing).
+                                let msg = e.to_string();
                                 info!(
                                     err = %e,
                                     outcome = %candidate.outcome,
@@ -1194,6 +1203,11 @@ async fn main() -> Result<()> {
                                     size = %intent.size,
                                     "🕐 decay: order rejected"
                                 );
+                                // Stop trying more candidates this tick on balance errors.
+                                if msg.contains("not enough balance") || msg.contains("allowance") {
+                                    debug!("decay: halting candidate loop — insufficient funds");
+                                    break;
+                                }
                             }
                         }
                     }

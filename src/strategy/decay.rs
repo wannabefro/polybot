@@ -265,6 +265,7 @@ pub fn evaluate_decay_buy(
     candidate: &DecayCandidate,
     config: &Config,
     tracker: &DecayTracker,
+    free_balance: Decimal,
 ) -> Option<OrderIntent> {
     let max_bet = Decimal::try_from(config.decay_max_bet_usdc).unwrap_or(dec!(2.0));
     let nav_cap = Decimal::try_from(config.nav_usdc * config.decay_nav_fraction)
@@ -290,8 +291,8 @@ pub fn evaluate_decay_buy(
         return None;
     }
 
-    // Per-market cap
-    let usdc_to_spend = max_bet.min(remaining_budget);
+    // Per-market cap, also capped by actual free USDC balance
+    let usdc_to_spend = max_bet.min(remaining_budget).min(free_balance);
 
     // Calculate size: spend / price, capped by available liquidity
     let desired_size = (usdc_to_spend / candidate.price)
@@ -510,7 +511,7 @@ mod tests {
             available_size: dec!(100),
         };
 
-        let intent = evaluate_decay_buy(&candidate, &config, &tracker).unwrap();
+        let intent = evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).unwrap();
         // $15 / $0.95 = 15.78 shares (rounded down)
         assert!(intent.size <= dec!(15.79));
         assert!(intent.size >= dec!(15.0));
@@ -535,7 +536,7 @@ mod tests {
             available_size: dec!(100),
         };
 
-        assert!(evaluate_decay_buy(&candidate, &config, &tracker).is_none());
+        assert!(evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).is_none());
     }
 
     #[test]
@@ -561,7 +562,7 @@ mod tests {
             available_size: dec!(100),
         };
 
-        assert!(evaluate_decay_buy(&candidate, &config, &tracker).is_none());
+        assert!(evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).is_none());
     }
 
     #[test]
@@ -580,7 +581,7 @@ mod tests {
             available_size: dec!(5), // only 5 shares at best ask
         };
 
-        let intent = evaluate_decay_buy(&candidate, &config, &tracker).unwrap();
+        let intent = evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).unwrap();
         assert_eq!(intent.size, dec!(5)); // capped to available
     }
 
@@ -600,7 +601,7 @@ mod tests {
             available_size: dec!(3), // only 3 shares, min is 15
         };
 
-        assert!(evaluate_decay_buy(&candidate, &config, &tracker).is_none());
+        assert!(evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).is_none());
     }
 
     #[test]

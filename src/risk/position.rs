@@ -100,7 +100,12 @@ pub fn spawn_recon(
     let nav = config.nav_usdc;
     let threshold = Decimal::from_f64_retain(nav * RECON_MISMATCH_THRESHOLD_PCT)
         .unwrap_or(Decimal::from(100));
-    let address = format!("{:#x}", signer.address());
+    let address = {
+        use polymarket_client_sdk::derive_proxy_wallet;
+        derive_proxy_wallet(signer.address(), config.chain_id)
+            .map(|a| format!("{:#x}", a))
+            .unwrap_or_else(|| format!("{:#x}", signer.address()))
+    };
     let paper_mode = config.paper_mode;
 
     tokio::spawn(async move {

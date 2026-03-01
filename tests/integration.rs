@@ -703,7 +703,7 @@ async fn decay_buy_paper_cycle() {
     let candidates = strategy::decay::scan_candidates(&[market.clone()], &books, &cfg, now);
     assert_eq!(candidates.len(), 1, "should find exactly one decay candidate");
 
-    let intent = strategy::decay::evaluate_decay_buy(&candidates[0], &cfg, &tracker)
+    let intent = strategy::decay::evaluate_decay_buy(&candidates[0], &cfg, &tracker, dec!(1000))
         .expect("should produce a buy intent");
     assert_eq!(intent.side, Side::Buy);
     assert_eq!(intent.order_type, OrderType::FOK);
@@ -726,7 +726,7 @@ async fn decay_buy_paper_cycle() {
 
     // Duplicate market should be skipped
     assert!(
-        strategy::decay::evaluate_decay_buy(&candidates[0], &cfg, &tracker).is_none(),
+        strategy::decay::evaluate_decay_buy(&candidates[0], &cfg, &tracker, dec!(1000)).is_none(),
         "should not buy same market twice"
     );
 }
