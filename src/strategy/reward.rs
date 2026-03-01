@@ -5,10 +5,12 @@
 //! the hedge window, the pair is considered hedged. If the complement
 //! doesn't fill in time, we SELL the tokens at best bid to flatten.
 
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 use crate::config::Config;
@@ -29,8 +31,26 @@ pub struct UnhedgedFill {
     pub filled_at: Instant,
     pub neg_risk: bool,
     pub fee_rate_bps: Decimal,
+    pub tick_size: Decimal,
     /// Number of failed unwind attempts (FOK didn't fill).
     pub unwind_attempts: u32,
+    /// Number of failed attempts in hard-stop stage.
+    pub hard_stop_failures: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnwindStage {
+    Stage1,
+    Stage2,
+    HardStop,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnwindOrder {
+    pub token_id: String,
+    pub condition_id: String,
+    pub stage: UnwindStage,
+    pub intent: OrderIntent,
 }
 
 impl UnhedgedFill {
@@ -39,29 +59,58 @@ impl UnhedgedFill {
         self.filled_at.elapsed() > timeout
     }
 
-    /// Build a SELL order to flatten this position.
-    /// First attempts use FOK (all-or-nothing). After `fok_threshold` failed
-    /// attempts, switches to GTC (resting limit) to guarantee eventual exit.
-    pub fn unwind_intent(&self, books: &BookStore, fok_threshold: u32) -> Option<OrderIntent> {
+    /// Build a SELL order to flatten this position at stage-specific aggressiveness.
+    pub fn unwind_intent(&self, books: &BookStore, stage: UnwindStage) -> Option<OrderIntent> {
         let book = books.get(&self.token_id)?;
         let bid = book.bids.best()?;
-
-        let order_type = if self.unwind_attempts >= fok_threshold {
-            OrderType::GTC // rest on book for guaranteed fill
+        let tick = if self.tick_size > Decimal::ZERO {
+            self.tick_size
         } else {
-            OrderType::FOK
+            dec!(0.01)
         };
+        let mut price = bid.price;
+        match stage {
+            UnwindStage::Stage1 => {}
+            UnwindStage::Stage2 => {
+                price -= tick;
+            }
+            UnwindStage::HardStop => {
+                price -= tick * dec!(2);
+            }
+        }
+        if price <= Decimal::ZERO {
+            return None;
+        }
 
         Some(OrderIntent {
             token_id: self.token_id.clone(),
             side: Side::Sell,
-            price: bid.price,
+            price,
             size: self.size,
-            order_type,
+            order_type: OrderType::FOK,
             post_only: false,
             neg_risk: self.neg_risk,
             fee_rate_bps: self.fee_rate_bps,
         })
+    }
+
+    pub fn stage_for_elapsed(
+        &self,
+        stage1: Duration,
+        stage2: Duration,
+        hard_stop: Duration,
+    ) -> Option<UnwindStage> {
+        let elapsed = self.filled_at.elapsed();
+        if elapsed < stage1 {
+            return None;
+        }
+        if elapsed >= hard_stop {
+            Some(UnwindStage::HardStop)
+        } else if elapsed >= stage2 {
+            Some(UnwindStage::Stage2)
+        } else {
+            Some(UnwindStage::Stage1)
+        }
     }
 }
 
@@ -72,6 +121,7 @@ impl UnhedgedFill {
 /// If only one side fills, we wait for the hedge window then unwind.
 pub struct HedgeTracker {
     unhedged: Vec<UnhedgedFill>,
+    #[allow(dead_code)]
     hedge_timeout: Duration,
 }
 
@@ -123,14 +173,27 @@ impl HedgeTracker {
         self.unhedged.retain(|f| f.token_id != token_id);
     }
 
-    /// Increment unwind attempts for a token and return the new count.
-    pub fn record_unwind_attempt(&mut self, token_id: &str) -> u32 {
-        if let Some(f) = self.unhedged.iter_mut().find(|f| f.token_id == token_id) {
-            f.unwind_attempts += 1;
-            f.unwind_attempts
-        } else {
-            0
+    /// Increment unwind counters for a token.
+    /// Returns `(unwind_attempts, hard_stop_failures)` when token is tracked.
+    pub fn record_unwind_attempt(
+        &mut self,
+        token_id: &str,
+        stage: UnwindStage,
+    ) -> Option<(u32, u32)> {
+        let f = self.unhedged.iter_mut().find(|f| f.token_id == token_id)?;
+        f.unwind_attempts += 1;
+        if stage == UnwindStage::HardStop {
+            f.hard_stop_failures += 1;
         }
+        Some((f.unwind_attempts, f.hard_stop_failures))
+    }
+
+    /// Return `(condition_id, hard_stop_failures)` for a token.
+    pub fn hard_stop_state(&self, token_id: &str) -> Option<(String, u32)> {
+        self.unhedged
+            .iter()
+            .find(|f| f.token_id == token_id)
+            .map(|f| (f.condition_id.clone(), f.hard_stop_failures))
     }
 
     /// Remove fills that have exceeded max unwind attempts.
@@ -142,14 +205,26 @@ impl HedgeTracker {
         before - self.unhedged.len()
     }
 
-    /// Get fills that have exceeded the hedge window and need unwinding.
-    /// Returns SELL intents to flatten the positions.
-    /// After `fok_threshold` failed FOK attempts, switches to GTC limit sells.
-    pub fn expired_unwinds(&self, books: &BookStore, fok_threshold: u32) -> Vec<OrderIntent> {
+    /// Get staged unwind intents for fills that have reached unwind windows.
+    pub fn expired_unwinds(
+        &self,
+        books: &BookStore,
+        stage1: Duration,
+        stage2: Duration,
+        hard_stop: Duration,
+    ) -> Vec<UnwindOrder> {
         self.unhedged
             .iter()
-            .filter(|f| f.hedge_expired(self.hedge_timeout))
-            .filter_map(|f| f.unwind_intent(books, fok_threshold))
+            .filter_map(|f| {
+                let stage = f.stage_for_elapsed(stage1, stage2, hard_stop)?;
+                let intent = f.unwind_intent(books, stage)?;
+                Some(UnwindOrder {
+                    token_id: f.token_id.clone(),
+                    condition_id: f.condition_id.clone(),
+                    stage,
+                    intent,
+                })
+            })
             .collect()
     }
 
@@ -161,7 +236,7 @@ impl HedgeTracker {
 
     /// Get condition_ids that have unhedged single-sided fills.
     /// Markets with these conditions should NOT receive new quotes.
-    pub fn unhedged_conditions(&self) -> std::collections::HashSet<String> {
+    pub fn unhedged_conditions(&self) -> HashSet<String> {
         self.unhedged.iter().map(|f| f.condition_id.clone()).collect()
     }
 
@@ -523,7 +598,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         };
         assert!(!fill.hedge_expired(Duration::from_secs(300)));
     }
@@ -539,7 +616,9 @@ mod tests {
             filled_at: Instant::now() - Duration::from_secs(301),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         };
         assert!(fill.hedge_expired(Duration::from_secs(300)));
     }
@@ -555,10 +634,12 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         };
         let books = make_book_store("0.48", "0.52");
-        let intent = fill.unwind_intent(&books, 5).unwrap();
+        let intent = fill.unwind_intent(&books, UnwindStage::Stage1).unwrap();
         assert!(matches!(intent.side, Side::Sell));
         assert_eq!(intent.price, dec!(0.48)); // sell at best bid
         assert_eq!(intent.size, dec!(10));
@@ -576,10 +657,12 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: true,
             fee_rate_bps: dec!(20),
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         };
         let books = make_book_store("0.48", "0.52");
-        let intent = fill.unwind_intent(&books, 5).unwrap();
+        let intent = fill.unwind_intent(&books, UnwindStage::Stage1).unwrap();
         assert!(intent.neg_risk);
         assert_eq!(intent.fee_rate_bps, dec!(20));
     }
@@ -595,10 +678,12 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         };
         let books = BookStore::new();
-        assert!(fill.unwind_intent(&books, 5).is_none());
+        assert!(fill.unwind_intent(&books, UnwindStage::Stage1).is_none());
     }
 
     // --- HedgeTracker tests ---
@@ -617,7 +702,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
         assert_eq!(tracker.unhedged_count(), 1);
     }
@@ -636,7 +723,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
         assert_eq!(tracker.unhedged_count(), 1);
 
@@ -650,7 +739,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
         assert_eq!(tracker.unhedged_count(), 0); // both removed
     }
@@ -668,7 +759,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
         tracker.record_fill(UnhedgedFill {
             token_id: "t2".into(),
@@ -679,7 +772,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
         assert_eq!(tracker.unhedged_count(), 2); // different conditions, not matched
     }
@@ -696,7 +791,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
         tracker.mark_hedged("t1");
         assert_eq!(tracker.unhedged_count(), 0);
@@ -716,7 +813,9 @@ mod tests {
             filled_at: Instant::now() - Duration::from_secs(1),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
         // Fresh fill (not expired)
         tracker.record_fill(UnhedgedFill {
@@ -728,14 +827,98 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
 
         let books = make_book_store("0.48", "0.52");
-        let unwinds = tracker.expired_unwinds(&books, 5);
+        let unwinds = tracker.expired_unwinds(
+            &books,
+            Duration::from_millis(100),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+        );
         assert_eq!(unwinds.len(), 1);
-        assert!(matches!(unwinds[0].side, Side::Sell)); // sells to flatten
-        assert_eq!(unwinds[0].price, dec!(0.48)); // at best bid
+        assert!(matches!(unwinds[0].intent.side, Side::Sell)); // sells to flatten
+        assert_eq!(unwinds[0].intent.price, dec!(0.48)); // at best bid
+    }
+
+    #[test]
+    fn unwind_stage_progression_and_price() {
+        let books = make_book_store("0.48", "0.52");
+        let base = UnhedgedFill {
+            token_id: "token1".into(),
+            condition_id: "cond1".into(),
+            side: Side::Buy,
+            price: dec!(0.50),
+            size: dec!(10),
+            filled_at: Instant::now() - Duration::from_secs(200),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
+        };
+
+        let i1 = base.unwind_intent(&books, UnwindStage::Stage1).unwrap();
+        let i2 = base.unwind_intent(&books, UnwindStage::Stage2).unwrap();
+        let i3 = base.unwind_intent(&books, UnwindStage::HardStop).unwrap();
+
+        assert_eq!(i1.price, dec!(0.48));
+        assert_eq!(i2.price, dec!(0.47));
+        assert_eq!(i3.price, dec!(0.46));
+    }
+
+    #[test]
+    fn hard_stop_failures_increment_and_state_available() {
+        let mut tracker = HedgeTracker::new(Duration::from_secs(300));
+        tracker.record_fill(UnhedgedFill {
+            token_id: "token1".into(),
+            condition_id: "cond1".into(),
+            side: Side::Buy,
+            price: dec!(0.50),
+            size: dec!(10),
+            filled_at: Instant::now() - Duration::from_secs(200),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
+        });
+        let _ = tracker.record_unwind_attempt("token1", UnwindStage::HardStop);
+        let _ = tracker.record_unwind_attempt("token1", UnwindStage::HardStop);
+        let state = tracker.hard_stop_state("token1").unwrap();
+        assert_eq!(state.0, "cond1");
+        assert_eq!(state.1, 2);
+    }
+
+    #[test]
+    fn expired_unwinds_do_not_mark_hedged_without_fill() {
+        let books = make_book_store("0.48", "0.52");
+        let mut tracker = HedgeTracker::new(Duration::from_secs(1));
+        tracker.record_fill(UnhedgedFill {
+            token_id: "token1".into(),
+            condition_id: "cond1".into(),
+            side: Side::Buy,
+            price: dec!(0.50),
+            size: dec!(10),
+            filled_at: Instant::now() - Duration::from_secs(2),
+            neg_risk: false,
+            fee_rate_bps: Decimal::ZERO,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
+        });
+
+        let unwinds = tracker.expired_unwinds(
+            &books,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(3),
+        );
+        assert_eq!(unwinds.len(), 1);
+        assert_eq!(tracker.unhedged_count(), 1, "tracker must remain unhedged until fill confirmation");
     }
 
     #[test]
@@ -750,7 +933,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
         tracker.clear();
         assert_eq!(tracker.unhedged_count(), 0);
@@ -770,7 +955,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
 
         let blocked = tracker.unhedged_conditions();
@@ -787,7 +974,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
         });
         assert!(tracker.unhedged_conditions().is_empty());
     }

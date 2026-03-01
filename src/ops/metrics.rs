@@ -31,6 +31,18 @@ pub struct Metrics {
     pub slippage_total: RwLock<Decimal>,
     /// Average quote staleness in milliseconds.
     pub quote_age_ms: AtomicU64,
+    /// Number of quote replacement (cancel+replace) actions.
+    pub quote_replacements: AtomicU64,
+    /// Number of forced unwind orders submitted.
+    pub forced_unwinds: AtomicU64,
+    /// Number of hard-stop unwind failure events.
+    pub unwind_hardstop_failures: AtomicU64,
+    /// Number of scalper markets selected on the latest tick.
+    pub scalper_markets_selected: AtomicU64,
+    /// Cumulative 5-second markout in ticks.
+    pub markout_5s_ticks_total: RwLock<Decimal>,
+    /// Cumulative 30-second markout in ticks.
+    pub markout_30s_ticks_total: RwLock<Decimal>,
 }
 
 impl Metrics {
@@ -53,6 +65,12 @@ impl Metrics {
             throttle_count: AtomicU64::new(0),
             slippage_total: RwLock::new(Decimal::ZERO),
             quote_age_ms: AtomicU64::new(0),
+            quote_replacements: AtomicU64::new(0),
+            forced_unwinds: AtomicU64::new(0),
+            unwind_hardstop_failures: AtomicU64::new(0),
+            scalper_markets_selected: AtomicU64::new(0),
+            markout_5s_ticks_total: RwLock::new(Decimal::ZERO),
+            markout_30s_ticks_total: RwLock::new(Decimal::ZERO),
         })
     }
 
@@ -136,6 +154,36 @@ impl Metrics {
         self.quote_age_ms.store(ms, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
+    pub fn inc_quote_replacements(&self) {
+        self.quote_replacements.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)]
+    pub fn inc_forced_unwinds(&self) {
+        self.forced_unwinds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)]
+    pub fn inc_unwind_hardstop_failures(&self) {
+        self.unwind_hardstop_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)]
+    pub fn update_scalper_markets_selected(&self, n: u64) {
+        self.scalper_markets_selected.store(n, Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)]
+    pub fn add_markout_5s_ticks(&self, ticks: Decimal) {
+        *self.markout_5s_ticks_total.write() += ticks;
+    }
+
+    #[allow(dead_code)]
+    pub fn add_markout_30s_ticks(&self, ticks: Decimal) {
+        *self.markout_30s_ticks_total.write() += ticks;
+    }
+
     /// Snapshot current metrics for structured logging.
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -155,6 +203,12 @@ impl Metrics {
             throttle_count: self.throttle_count.load(Ordering::Relaxed),
             slippage_total: *self.slippage_total.read(),
             quote_age_ms: self.quote_age_ms.load(Ordering::Relaxed),
+            quote_replacements: self.quote_replacements.load(Ordering::Relaxed),
+            forced_unwinds: self.forced_unwinds.load(Ordering::Relaxed),
+            unwind_hardstop_failures: self.unwind_hardstop_failures.load(Ordering::Relaxed),
+            scalper_markets_selected: self.scalper_markets_selected.load(Ordering::Relaxed),
+            markout_5s_ticks_total: *self.markout_5s_ticks_total.read(),
+            markout_30s_ticks_total: *self.markout_30s_ticks_total.read(),
         }
     }
 
@@ -176,6 +230,12 @@ impl Metrics {
             throttle_count = s.throttle_count,
             slippage = %s.slippage_total,
             quote_age_ms = s.quote_age_ms,
+            quote_replacements = s.quote_replacements,
+            forced_unwinds = s.forced_unwinds,
+            unwind_hardstop_failures = s.unwind_hardstop_failures,
+            scalper_markets_selected = s.scalper_markets_selected,
+            markout_5s_ticks_total = %s.markout_5s_ticks_total,
+            markout_30s_ticks_total = %s.markout_30s_ticks_total,
             "metrics: summary"
         );
     }
@@ -192,9 +252,15 @@ impl Metrics {
         self.heartbeat_age_ms.store(0, Ordering::Relaxed);
         self.throttle_count.store(0, Ordering::Relaxed);
         self.quote_age_ms.store(0, Ordering::Relaxed);
+        self.quote_replacements.store(0, Ordering::Relaxed);
+        self.forced_unwinds.store(0, Ordering::Relaxed);
+        self.unwind_hardstop_failures.store(0, Ordering::Relaxed);
+        self.scalper_markets_selected.store(0, Ordering::Relaxed);
         *self.daily_pnl.write() = Decimal::ZERO;
         *self.rebate_accrual.write() = Decimal::ZERO;
         *self.slippage_total.write() = Decimal::ZERO;
+        *self.markout_5s_ticks_total.write() = Decimal::ZERO;
+        *self.markout_30s_ticks_total.write() = Decimal::ZERO;
     }
 }
 
@@ -217,6 +283,12 @@ pub struct MetricsSnapshot {
     pub throttle_count: u64,
     pub slippage_total: Decimal,
     pub quote_age_ms: u64,
+    pub quote_replacements: u64,
+    pub forced_unwinds: u64,
+    pub unwind_hardstop_failures: u64,
+    pub scalper_markets_selected: u64,
+    pub markout_5s_ticks_total: Decimal,
+    pub markout_30s_ticks_total: Decimal,
 }
 
 /// Spawn periodic metrics logging.
@@ -398,6 +470,12 @@ mod tests {
         m.inc_throttle_count();
         m.add_slippage(dec!(1.0));
         m.update_quote_age_ms(200);
+        m.inc_quote_replacements();
+        m.inc_forced_unwinds();
+        m.inc_unwind_hardstop_failures();
+        m.update_scalper_markets_selected(3);
+        m.add_markout_5s_ticks(dec!(1.5));
+        m.add_markout_30s_ticks(dec!(-0.5));
 
         m.reset_daily();
         let s = m.snapshot();
@@ -407,5 +485,11 @@ mod tests {
         assert_eq!(s.throttle_count, 0);
         assert_eq!(s.slippage_total, Decimal::ZERO);
         assert_eq!(s.quote_age_ms, 0);
+        assert_eq!(s.quote_replacements, 0);
+        assert_eq!(s.forced_unwinds, 0);
+        assert_eq!(s.unwind_hardstop_failures, 0);
+        assert_eq!(s.scalper_markets_selected, 0);
+        assert_eq!(s.markout_5s_ticks_total, Decimal::ZERO);
+        assert_eq!(s.markout_30s_ticks_total, Decimal::ZERO);
     }
 }

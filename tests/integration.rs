@@ -223,7 +223,9 @@ async fn complement_fills_auto_hedge() {
         filled_at: Instant::now(),
         neg_risk: false,
         fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
     });
     assert_eq!(tracker.unhedged_count(), 1);
 
@@ -237,7 +239,9 @@ async fn complement_fills_auto_hedge() {
         filled_at: Instant::now(),
         neg_risk: false,
         fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
     });
     assert_eq!(tracker.unhedged_count(), 0, "complement fills should auto-hedge");
 }
@@ -258,14 +262,21 @@ async fn expired_fill_generates_unwind() {
         filled_at: Instant::now() - Duration::from_secs(1),
         neg_risk: false,
         fee_rate_bps: Decimal::ZERO,
+                tick_size: dec!(0.01),
                 unwind_attempts: 0,
+                hard_stop_failures: 0,
     });
 
-    let unwinds = tracker.expired_unwinds(&books, 5);
+    let unwinds = tracker.expired_unwinds(
+        &books,
+        Duration::from_millis(100),
+        Duration::from_secs(2),
+        Duration::from_secs(4),
+    );
     assert_eq!(unwinds.len(), 1);
-    assert!(matches!(unwinds[0].side, Side::Sell), "unwind should sell tokens");
-    assert_eq!(unwinds[0].price, dec!(0.48), "should sell at best bid");
-    assert!(!unwinds[0].post_only, "unwinds should not be post-only");
+    assert!(matches!(unwinds[0].intent.side, Side::Sell), "unwind should sell tokens");
+    assert_eq!(unwinds[0].intent.price, dec!(0.48), "should sell at best bid");
+    assert!(!unwinds[0].intent.post_only, "unwinds should not be post-only");
 }
 
 /// Mean reversion: full cycle from price recording to exit.
