@@ -21,6 +21,9 @@ use crate::order::pipeline::OrderIntent;
 pub struct DecayTracker {
     /// condition_id → (token_id, size bought, cost_basis)
     pub positions: HashMap<String, DecayPosition>,
+    /// token_ids already held on-chain (bootstrapped from positions API).
+    /// Prevents duplicate buys after restart.
+    held_tokens: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +42,19 @@ impl DecayTracker {
     pub fn new() -> Self {
         Self {
             positions: HashMap::new(),
+            held_tokens: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Seed with token_ids from on-chain positions to prevent duplicate buys.
+    pub fn seed_held_tokens(&mut self, remote: &HashMap<String, Decimal>) {
+        for (token_id, size) in remote {
+            if *size > Decimal::ZERO {
+                self.held_tokens.insert(token_id.clone());
+            }
+        }
+        if !self.held_tokens.is_empty() {
+            info!(count = self.held_tokens.len(), "decay: seeded held tokens from on-chain positions");
         }
     }
 
@@ -73,6 +89,7 @@ impl DecayTracker {
             });
         entry.size += size;
         entry.cost_basis += cost;
+        self.held_tokens.insert(token_id.to_string());
     }
 
     /// Remove positions for markets that are no longer accepting orders (resolved).
@@ -264,6 +281,12 @@ pub fn evaluate_decay_buy(
     // Already have a position in this market?
     if tracker.positions.contains_key(&candidate.condition_id) {
         debug!(condition_id = %candidate.condition_id, "decay: skip — duplicate position");
+        return None;
+    }
+
+    // Already hold this token on-chain (from prior run)?
+    if tracker.held_tokens.contains(&candidate.token_id) {
+        debug!(token_id = %candidate.token_id, "decay: skip — already held on-chain");
         return None;
     }
 

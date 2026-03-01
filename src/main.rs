@@ -453,6 +453,17 @@ async fn main() -> Result<()> {
     let mut active_quotes: HashMap<String, ActiveQuote> = HashMap::new();
     let mut pending_markouts: Vec<PendingMarkout> = Vec::new();
     let mut decay_tracker = strategy::decay::DecayTracker::new();
+
+    // Bootstrap decay tracker with on-chain positions to prevent duplicate buys.
+    {
+        let address = format!("{:#x}", auth_ctx.signer.address());
+        match risk::position::fetch_remote_positions(&address).await {
+            Ok(ref positions) if !positions.is_empty() => {
+                decay_tracker.seed_held_tokens(positions);
+            }
+            _ => {} // already logged above during risk engine bootstrap
+        }
+    }
     let mut decay_scan_tick = 0u32;
     let mut reward_enabled = cfg.nav_usdc >= cfg.reward_min_nav_usdc;
     let mut mean_revert_enabled = cfg.nav_usdc >= cfg.mean_revert_min_nav_usdc;
