@@ -121,20 +121,29 @@ pub fn scan_candidates(
     let window_secs = (config.decay_window_hours * 3600.0) as i64;
 
     let mut candidates = Vec::new();
+    let mut skip_non_binary = 0u32;
+    let mut skip_no_end_date = 0u32;
+    let mut skip_outside_window = 0u32;
+    let mut skip_tag_excluded = 0u32;
+    let mut skip_low_price = 0u32;
+    let mut skip_no_book = 0u32;
+    let mut skip_no_ask = 0u32;
 
     for market in markets {
         // Binary markets only (exactly 2 outcomes)
         if market.tokens.len() != 2 {
+            skip_non_binary += 1;
             continue;
         }
 
         // Must have an end date within the window
         let end_date = match market.end_date {
             Some(d) => d,
-            None => continue,
+            None => { skip_no_end_date += 1; continue; }
         };
         let secs_remaining = (end_date - now).num_seconds();
         if secs_remaining <= 0 || secs_remaining > window_secs {
+            skip_outside_window += 1;
             continue;
         }
 
@@ -144,6 +153,7 @@ pub fn scan_candidates(
             config.decay_excluded_tags.iter().any(|ex| lower.contains(ex))
         });
         if excluded {
+            skip_tag_excluded += 1;
             continue;
         }
 
@@ -156,19 +166,20 @@ pub fn scan_candidates(
 
         let token = match best_token {
             Some(t) => t,
-            None => continue,
+            None => { skip_low_price += 1; continue; }
         };
 
         // Verify there's actually an ask available at a reasonable price
         let book = match books.get(&token.token_id) {
             Some(b) => b,
-            None => continue,
+            None => { skip_no_book += 1; continue; }
         };
         let best_ask = match book.asks.best() {
             Some(a) => a.price,
-            None => continue,
+            None => { skip_no_ask += 1; continue; }
         };
         if best_ask > Decimal::ONE || best_ask < min_price {
+            skip_low_price += 1;
             continue;
         }
 
@@ -184,6 +195,22 @@ pub fn scan_candidates(
             fee_rate_bps: market.maker_fee_bps,
             min_order_size: market.min_order_size,
         });
+    }
+
+    if candidates.is_empty() && !markets.is_empty() {
+        debug!(
+            total = markets.len(),
+            skip_non_binary,
+            skip_no_end_date,
+            skip_outside_window,
+            skip_tag_excluded,
+            skip_low_price,
+            skip_no_book,
+            skip_no_ask,
+            min_price = %min_price,
+            window_hours = config.decay_window_hours,
+            "decay: no candidates found — filter breakdown"
+        );
     }
 
     // Sort by price descending (highest conviction first)
@@ -331,7 +358,7 @@ mod tests {
     #[test]
     fn scan_skips_market_outside_window() {
         let now = Utc::now();
-        let end = now + ChronoDuration::hours(96); // beyond 72h window
+        let end = now + ChronoDuration::hours(200); // beyond 168h window
         let market = make_market("c1", Some(end), make_tokens("0.95", "0.05"), vec![], false);
         let books = make_books_with_ask("tok_yes", dec!(0.95));
         let config = test_config();
@@ -344,8 +371,8 @@ mod tests {
     fn scan_skips_low_price() {
         let now = Utc::now();
         let end = now + ChronoDuration::hours(12);
-        let market = make_market("c1", Some(end), make_tokens("0.80", "0.20"), vec![], false);
-        let books = make_books_with_ask("tok_yes", dec!(0.80));
+        let market = make_market("c1", Some(end), make_tokens("0.75", "0.25"), vec![], false);
+        let books = make_books_with_ask("tok_yes", dec!(0.75));
         let config = test_config();
 
         let candidates = scan_candidates(&[market], &books, &config, now);
@@ -423,9 +450,9 @@ mod tests {
         };
 
         let intent = evaluate_decay_buy(&candidate, &config, &tracker).unwrap();
-        // $10 / $0.95 = 10.52 shares (rounded down to 10.52)
-        assert!(intent.size <= dec!(10.53));
-        assert!(intent.size >= dec!(10.0));
+        // $15 / $0.95 = 15.78 shares (rounded down)
+        assert!(intent.size <= dec!(15.79));
+        assert!(intent.size >= dec!(15.0));
         assert_eq!(intent.order_type, OrderType::FOK);
     }
 
