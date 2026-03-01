@@ -119,6 +119,16 @@ pub fn spawn_recon(
                 continue;
             }
 
+            // Grace period after live fills: the data API lags 30-60s behind
+            // on-chain settlement, so skip recon to avoid false mismatch halts.
+            const FILL_GRACE_SECS: u64 = 90;
+            let secs = risk_engine.secs_since_last_fill();
+            if secs < FILL_GRACE_SECS {
+                debug!(secs_since_fill = secs, grace = FILL_GRACE_SECS,
+                    "position-recon: within fill grace period, skipping");
+                continue;
+            }
+
             match fetch_remote_positions(&address).await {
                 Ok(remote) => {
                     let local = risk_engine.inventory_snapshot();

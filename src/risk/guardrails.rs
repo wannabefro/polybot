@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -39,6 +39,8 @@ pub struct RiskEngine {
     halted: AtomicBool,
     /// Consecutive cancel failure counter.
     cancel_failures: AtomicU32,
+    /// Epoch millis of last live fill (for recon grace period).
+    last_fill_epoch_ms: AtomicU64,
 }
 
 /// Safely convert f64 NAV limit to Decimal. Panics on NaN/Inf at startup
@@ -78,6 +80,7 @@ impl RiskEngine {
             daily_pnl: RwLock::new(Decimal::ZERO),
             halted: AtomicBool::new(false),
             cancel_failures: AtomicU32::new(0),
+            last_fill_epoch_ms: AtomicU64::new(0),
         })
     }
 
@@ -194,6 +197,25 @@ impl RiskEngine {
                 _ => {}
             }
         }
+        // Record fill timestamp for recon grace period
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.last_fill_epoch_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    /// Seconds elapsed since the last recorded fill (for recon grace period).
+    pub fn secs_since_last_fill(&self) -> u64 {
+        let last_ms = self.last_fill_epoch_ms.load(Ordering::Relaxed);
+        if last_ms == 0 {
+            return u64::MAX; // no fill yet
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        (now_ms.saturating_sub(last_ms)) / 1000
     }
 
     /// Record realized P&L.
