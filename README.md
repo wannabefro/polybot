@@ -21,6 +21,76 @@ cargo build --release
 cargo run --release
 ```
 
+## Deployment
+
+### Local (development)
+
+```bash
+cp deploy/.env.example .env.local
+# Edit .env.local with your private key and settings
+POLYBOT_PAPER_MODE=false cargo run --release
+```
+
+### Server (systemd)
+
+**1. Build the binary** (on your dev machine or CI):
+
+```bash
+# Native build (run on the target server)
+cargo build --release
+
+# Or cross-compile for Linux x86_64 from macOS
+cargo build --release --target x86_64-unknown-linux-gnu
+```
+
+**2. Install on the server:**
+
+```bash
+# With pre-built binary
+sudo ./deploy/install.sh ./target/release/polybot
+
+# Or build on server (requires Rust toolchain)
+sudo ./deploy/install.sh
+```
+
+**3. Configure:**
+
+```bash
+sudo nano /opt/polybot/.env
+# Set POLYBOT_PRIVATE_KEY, POLYBOT_PAPER_MODE=false, POLYBOT_NAV_USDC, etc.
+# For geo-restricted regions, set NORDVPN_* variables (see .env.example)
+```
+
+**4. Start:**
+
+```bash
+sudo systemctl start polybot
+sudo systemctl enable polybot   # auto-start on boot
+journalctl -u polybot -f        # tail logs
+```
+
+### SOCKS5 Proxy (geo-restricted regions)
+
+If running from a region blocked by Polymarket, configure a SOCKS5 proxy in `.env`:
+
+```bash
+NORDVPN_USER=your_service_username
+NORDVPN_PASS=your_service_password
+NORDVPN_HOST=se.socks.nordhold.net   # Sweden — Finland also works
+NORDVPN_PORT=1080
+```
+
+The bot sets `ALL_PROXY` before creating HTTP clients. All REST API traffic routes through the proxy. WebSocket connections are direct (not geo-blocked).
+
+> **Note:** US, Netherlands, and most EU countries are blocked. Sweden and Finland are confirmed working.
+
+### Systemd service details
+
+- Sends `SIGINT` on stop (clean shutdown with order cancellation)
+- Restarts on failure with 30s backoff
+- Runs as dedicated `polybot` user with filesystem hardening
+- Logs to journald (`journalctl -u polybot`)
+
 ## Project Structure
 
 ```
@@ -42,6 +112,7 @@ src/
 │   └── rate_limit.rs    # Token-bucket rate limiter
 ├── strategy/
 │   ├── rebate_mm.rs     # Rebate market-making (primary)
+│   ├── decay.rs         # Time-decay buying strategy
 │   ├── mean_revert.rs   # Behavioral mean reversion
 │   └── reward.rs        # Reward/sponsored capture
 ├── intelligence/
