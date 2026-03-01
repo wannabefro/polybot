@@ -123,8 +123,8 @@ pub fn scan_candidates(
     let mut candidates = Vec::new();
 
     for market in markets {
-        // Binary markets only (exactly 2 outcomes, no neg-risk multi-outcome)
-        if market.tokens.len() != 2 || market.neg_risk {
+        // Binary markets only (exactly 2 outcomes)
+        if market.tokens.len() != 2 {
             continue;
         }
 
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn scan_skips_market_outside_window() {
         let now = Utc::now();
-        let end = now + ChronoDuration::hours(72); // beyond 48h window
+        let end = now + ChronoDuration::hours(96); // beyond 72h window
         let market = make_market("c1", Some(end), make_tokens("0.95", "0.05"), vec![], false);
         let books = make_books_with_ask("tok_yes", dec!(0.95));
         let config = test_config();
@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_skips_neg_risk() {
+    fn scan_accepts_neg_risk() {
         let now = Utc::now();
         let end = now + ChronoDuration::hours(12);
         let market = make_market("c1", Some(end), make_tokens("0.95", "0.05"), vec![], true);
@@ -376,7 +376,7 @@ mod tests {
         let config = test_config();
 
         let candidates = scan_candidates(&[market], &books, &config, now);
-        assert!(candidates.is_empty());
+        assert_eq!(candidates.len(), 1);
     }
 
     #[test]
