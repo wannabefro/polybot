@@ -11,7 +11,7 @@ polymarket-client-sdk = { git = "https://github.com/Polymarket/rs-clob-client", 
 ] }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "process"] }
 tokio-util = "0.7"
 
 # HTTP + WebSocket

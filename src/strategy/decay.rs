@@ -249,6 +249,7 @@ pub fn evaluate_decay_buy(
 
     // Already have a position in this market?
     if tracker.positions.contains_key(&candidate.condition_id) {
+        debug!(condition_id = %candidate.condition_id, "decay: skip duplicate position");
         return None;
     }
 
@@ -260,16 +261,24 @@ pub fn evaluate_decay_buy(
         .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
 
     if size < candidate.min_order_size || size <= Decimal::ZERO {
+        info!(
+            condition_id = %candidate.condition_id,
+            size = %size,
+            min_order_size = %candidate.min_order_size,
+            price = %candidate.price,
+            usdc_to_spend = %usdc_to_spend,
+            "decay: skip — size below minimum"
+        );
         return None;
     }
 
-    debug!(
+    info!(
         condition_id = %candidate.condition_id,
         outcome = %candidate.outcome,
         price = %candidate.price,
         size = %size,
         hours_to_end = candidate.hours_to_end,
-        "decay: buy candidate"
+        "decay: placing FOK buy"
     );
 
     Some(OrderIntent {
