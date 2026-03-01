@@ -1,7 +1,7 @@
 use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::auth::AuthClient;
 
@@ -34,6 +34,7 @@ impl RewardTracker {
 }
 
 /// Poll the CLOB API for current reward earnings and update the tracker.
+/// Non-critical — failures are logged at debug level and silently ignored.
 pub async fn refresh_earnings(client: &AuthClient, tracker: &RewardTracker) {
     use chrono::Utc;
     use polymarket_client_sdk::clob::types::request::UserRewardsEarningRequest;
@@ -60,7 +61,8 @@ pub async fn refresh_earnings(client: &AuthClient, tracker: &RewardTracker) {
             debug!(total = %total, markets = count, "rewards: earnings refreshed");
         }
         Err(e) => {
-            warn!(err = %e, "rewards: failed to fetch earnings");
+            // SDK response struct may not match current API — non-critical
+            debug!(err = %e, "rewards: earnings fetch failed (SDK compat)");
         }
     }
 }

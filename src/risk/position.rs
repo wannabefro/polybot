@@ -108,7 +108,7 @@ pub fn spawn_recon(
             ticker.tick().await;
 
             if risk_engine.is_halted() {
-                warn!("position-recon: risk engine halted, skipping");
+                debug!("position-recon: risk engine halted, skipping");
                 continue;
             }
 

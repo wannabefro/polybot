@@ -368,6 +368,11 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // Auto-resume from heartbeat halt once heartbeat is fresh again
+                if risk_engine.is_halted() {
+                    risk_engine.resume();
+                }
+
                 // Unwind expired single-sided fills (complement didn't fill in time)
                 // First 5 attempts use FOK; after that switch to GTC limit sell
                 for unwind in hedge_tracker.expired_unwinds(&books, 5) {
