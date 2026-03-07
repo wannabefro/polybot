@@ -131,6 +131,20 @@ pub struct DecayCandidate {
     pub min_order_size: Decimal,
     /// Total size available at or below the candidate price (sum of ask levels ≤ price).
     pub available_size: Decimal,
+    /// Whether this is a sports market (uses shorter window and smaller max bet).
+    pub is_sports: bool,
+}
+
+/// Check if a market is a sports market based on tags.
+fn is_sports_market(market: &TradableMarket) -> bool {
+    market.tags.iter().any(|t| {
+        let lower = t.to_lowercase();
+        lower.contains("sports") || lower.contains("football") || lower.contains("basketball")
+            || lower.contains("baseball") || lower.contains("hockey") || lower.contains("soccer")
+            || lower.contains("tennis") || lower.contains("golf") || lower.contains("boxing")
+            || lower.contains("mma") || lower.contains("nfl") || lower.contains("nba")
+            || lower.contains("mlb") || lower.contains("nhl") || lower.contains("ncaa")
+    })
 }
 
 /// Scan tradable markets for decay candidates.
@@ -144,8 +158,10 @@ pub fn scan_candidates(
         return vec![];
     }
 
-    let min_price = Decimal::try_from(config.decay_min_price).unwrap_or(dec!(0.93));
-    let window_secs = (config.decay_window_hours * 3600.0) as i64;
+    let default_min_price = Decimal::try_from(config.decay_min_price).unwrap_or(dec!(0.80));
+    let sports_min_price = Decimal::try_from(config.decay_sports_min_price).unwrap_or(dec!(0.90));
+    let default_window_secs = (config.decay_window_hours * 3600.0) as i64;
+    let sports_window_secs = (config.decay_sports_window_hours * 3600.0) as i64;
 
     let mut candidates = Vec::new();
     let mut skip_non_binary = 0u32;
@@ -169,6 +185,15 @@ pub fn scan_candidates(
             None => { skip_no_end_date += 1; continue; }
         };
         let secs_remaining = (end_date - now).num_seconds();
+
+        // Use sports-specific window for sports markets
+        let is_sports = is_sports_market(market);
+        let window_secs = if is_sports {
+            sports_window_secs
+        } else {
+            default_window_secs
+        };
+
         if secs_remaining <= 0 || secs_remaining > window_secs {
             skip_outside_window += 1;
             continue;
@@ -183,6 +208,13 @@ pub fn scan_candidates(
             skip_tag_excluded += 1;
             continue;
         }
+
+        // Use sports-specific min price for sports markets
+        let min_price = if is_sports {
+            sports_min_price
+        } else {
+            default_min_price
+        };
 
         // Find the highest-priced token that exceeds min_price
         let best_token = market
@@ -233,6 +265,7 @@ pub fn scan_candidates(
             fee_rate_bps: market.maker_fee_bps,
             min_order_size: market.min_order_size,
             available_size: sweep_size,
+            is_sports,
         });
     }
 
@@ -246,8 +279,10 @@ pub fn scan_candidates(
             skip_low_price,
             skip_no_book,
             skip_no_ask,
-            min_price = %min_price,
+            min_price = %default_min_price,
+            sports_min_price = %sports_min_price,
             window_hours = config.decay_window_hours,
+            sports_window_hours = config.decay_sports_window_hours,
             "🔍 decay: no candidates — filter breakdown"
         );
     } else if !candidates.is_empty() {
@@ -259,6 +294,10 @@ pub fn scan_candidates(
             skip_low_price,
             best_price = %candidates[0].price,
             best_hours = format!("{:.1}", candidates[0].hours_to_end),
+            min_price = %default_min_price,
+            sports_min_price = %sports_min_price,
+            window_hours = config.decay_window_hours,
+            sports_window_hours = config.decay_sports_window_hours,
             "🔍 decay: candidates found"
         );
     }
@@ -275,7 +314,12 @@ pub fn evaluate_decay_buy(
     tracker: &DecayTracker,
     free_balance: Decimal,
 ) -> Option<OrderIntent> {
-    let max_bet = Decimal::try_from(config.decay_max_bet_usdc).unwrap_or(dec!(2.0));
+    // Use sports-specific max bet for sports markets
+    let max_bet = if candidate.is_sports {
+        Decimal::try_from(config.decay_sports_max_bet_usdc).unwrap_or(dec!(5.0))
+    } else {
+        Decimal::try_from(config.decay_max_bet_usdc).unwrap_or(dec!(15.0))
+    };
     let nav_cap = Decimal::try_from(config.nav_usdc * config.decay_nav_fraction)
         .unwrap_or(dec!(100.0));
 
@@ -527,6 +571,7 @@ mod tests {
             fee_rate_bps: dec!(0),
             min_order_size: dec!(1.0),
             available_size: dec!(100),
+            is_sports: false,
         };
 
         let intent = evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).unwrap();
@@ -552,6 +597,7 @@ mod tests {
             fee_rate_bps: dec!(0),
             min_order_size: dec!(1.0),
             available_size: dec!(100),
+            is_sports: false,
         };
 
         assert!(evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).is_none());
@@ -578,6 +624,7 @@ mod tests {
             fee_rate_bps: dec!(0),
             min_order_size: dec!(1.0),
             available_size: dec!(100),
+            is_sports: false,
         };
 
         assert!(evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).is_none());
@@ -597,6 +644,7 @@ mod tests {
             fee_rate_bps: dec!(0),
             min_order_size: dec!(1.0),
             available_size: dec!(5), // only 5 shares at best ask
+            is_sports: false,
         };
 
         let intent = evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).unwrap();
@@ -617,6 +665,7 @@ mod tests {
             fee_rate_bps: dec!(0),
             min_order_size: dec!(15.0),
             available_size: dec!(3), // only 3 shares, min is 15
+            is_sports: false,
         };
 
         assert!(evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).is_none());
@@ -677,5 +726,182 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].price, dec!(0.97)); // highest first
         assert_eq!(candidates[1].price, dec!(0.93));
+    }
+
+    #[test]
+    fn scan_sports_market_within_sports_window() {
+        let now = Utc::now();
+        // 3 minutes = within 5 min sports window
+        let end = now + ChronoDuration::minutes(3);
+        let market = make_market(
+            "c1", Some(end), make_tokens("0.95", "0.05"),
+            vec!["Sports".to_string()], false,
+        );
+        let books = make_books_with_ask("tok_yes", dec!(0.95));
+        let config = test_config();
+
+        let candidates = scan_candidates(&[market], &books, &config, now);
+        assert_eq!(candidates.len(), 1, "sports market within 5min window should be found");
+    }
+
+    #[test]
+    fn scan_sports_market_outside_sports_window_skipped() {
+        let now = Utc::now();
+        // 10 minutes = outside 5 min sports window, but within 24h normal window
+        let end = now + ChronoDuration::minutes(10);
+        let market = make_market(
+            "c1", Some(end), make_tokens("0.95", "0.05"),
+            vec!["Sports".to_string()], false,
+        );
+        let books = make_books_with_ask("tok_yes", dec!(0.95));
+        let config = test_config();
+
+        let candidates = scan_candidates(&[market], &books, &config, now);
+        assert!(candidates.is_empty(), "sports market outside 5min window should be skipped");
+    }
+
+    #[test]
+    fn scan_non_sports_within_24h_window() {
+        let now = Utc::now();
+        // 12 hours = within 24h normal window
+        let end = now + ChronoDuration::hours(12);
+        let market = make_market("c1", Some(end), make_tokens("0.95", "0.05"), vec![], false);
+        let books = make_books_with_ask("tok_yes", dec!(0.95));
+        let config = test_config();
+
+        let candidates = scan_candidates(&[market], &books, &config, now);
+        assert_eq!(candidates.len(), 1, "non-sports market within 24h window should be found");
+    }
+
+    #[test]
+    fn scan_non_sports_outside_24h_window_skipped() {
+        let now = Utc::now();
+        // 48 hours = outside 24h normal window
+        let end = now + ChronoDuration::hours(48);
+        let market = make_market("c1", Some(end), make_tokens("0.95", "0.05"), vec![], false);
+        let books = make_books_with_ask("tok_yes", dec!(0.95));
+        let config = test_config();
+
+        let candidates = scan_candidates(&[market], &books, &config, now);
+        assert!(candidates.is_empty(), "non-sports market outside 24h window should be skipped");
+    }
+
+    #[test]
+    fn is_sports_market_detects_various_tags() {
+        let sports_tags = vec![
+            vec!["Sports"],
+            vec!["Football"],
+            vec!["Basketball"],
+            vec!["NFL"],
+            vec!["NBA"],
+            vec!["Soccer"],
+            vec!["Baseball"],
+            vec!["MLB"],
+            vec!["Hockey"],
+            vec!["NHL"],
+            vec!["Tennis"],
+            vec!["Golf"],
+            vec!["Boxing"],
+            vec!["MMA"],
+            vec!["NCAA"],
+        ];
+
+        for tags in sports_tags {
+            let market = TradableMarket {
+                condition_id: "c1".into(),
+                question: "Test?".into(),
+                tokens: vec![],
+                neg_risk: false,
+                neg_risk_market_id: None,
+                min_tick_size: dec!(0.01),
+                min_order_size: dec!(1.0),
+                maker_fee_bps: dec!(0),
+                rewards_active: false,
+                rewards_max_spread: None,
+                rewards_min_size: None,
+                volume_24h: 0.0,
+                tags: tags.iter().map(|s| s.to_string()).collect(),
+                end_date: None,
+            };
+            assert!(is_sports_market(&market), "should detect {:?} as sports", tags);
+        }
+    }
+
+    #[test]
+    fn evaluate_uses_sports_max_bet_for_sports_candidates() {
+        let config = test_config();
+        let tracker = DecayTracker::new();
+
+        // Sports candidate should use decay_sports_max_bet_usdc ($5)
+        let sports_candidate = DecayCandidate {
+            condition_id: "c1".to_string(),
+            token_id: "tok_yes".to_string(),
+            outcome: "Yes".to_string(),
+            price: dec!(0.95),
+            hours_to_end: 0.05, // 3 mins
+            neg_risk: false,
+            fee_rate_bps: dec!(0),
+            min_order_size: dec!(1.0),
+            available_size: dec!(100),
+            is_sports: true,
+        };
+
+        let intent = evaluate_decay_buy(&sports_candidate, &config, &tracker, dec!(1000)).unwrap();
+        // $5 / $0.95 = 5.26 shares (rounded down)
+        assert!(intent.size <= dec!(5.27), "sports bet should be capped at $5");
+        assert!(intent.size >= dec!(5.0), "sports bet should be at least $5 worth");
+
+        // Non-sports candidate should use decay_max_bet_usdc ($15)
+        let normal_candidate = DecayCandidate {
+            condition_id: "c2".to_string(),
+            token_id: "tok_yes".to_string(),
+            outcome: "Yes".to_string(),
+            price: dec!(0.95),
+            hours_to_end: 12.0,
+            neg_risk: false,
+            fee_rate_bps: dec!(0),
+            min_order_size: dec!(1.0),
+            available_size: dec!(100),
+            is_sports: false,
+        };
+
+        let intent2 = evaluate_decay_buy(&normal_candidate, &config, &tracker, dec!(1000)).unwrap();
+        // $15 / $0.95 = 15.78 shares (rounded down)
+        assert!(intent2.size <= dec!(15.79), "normal bet should be capped at $15");
+        assert!(intent2.size >= dec!(15.0), "normal bet should be at least $15 worth");
+    }
+
+    #[test]
+    fn scan_sports_requires_higher_min_price() {
+        let now = Utc::now();
+        let end = now + ChronoDuration::minutes(3); // within sports window
+
+        // Price at 0.85 - should qualify for normal (min 0.80) but not sports (min 0.90)
+        let market = make_market(
+            "c1", Some(end), make_tokens("0.85", "0.15"),
+            vec!["Sports".to_string()], false,
+        );
+        let books = make_books_with_ask("tok_yes", dec!(0.85));
+        let config = test_config();
+
+        let candidates = scan_candidates(&[market], &books, &config, now);
+        assert!(candidates.is_empty(), "sports market at 0.85 should be skipped (min is 0.90)");
+    }
+
+    #[test]
+    fn scan_sports_at_90_price_qualifies() {
+        let now = Utc::now();
+        let end = now + ChronoDuration::minutes(3); // within sports window
+
+        // Price at 0.90 - should qualify for sports (min 0.90)
+        let market = make_market(
+            "c1", Some(end), make_tokens("0.90", "0.10"),
+            vec!["Sports".to_string()], false,
+        );
+        let books = make_books_with_ask("tok_yes", dec!(0.90));
+        let config = test_config();
+
+        let candidates = scan_candidates(&[market], &books, &config, now);
+        assert_eq!(candidates.len(), 1, "sports market at 0.90 should qualify");
     }
 }

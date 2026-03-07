@@ -71,8 +71,11 @@ pub struct Config {
     // ── Decay (time-decay penny collector) strategy ──
     pub decay_enabled: bool,
     pub decay_min_price: f64,
+    pub decay_sports_min_price: f64,
     pub decay_max_bet_usdc: f64,
+    pub decay_sports_max_bet_usdc: f64,
     pub decay_window_hours: f64,
+    pub decay_sports_window_hours: f64,
     pub decay_nav_fraction: f64,
     pub decay_excluded_tags: Vec<String>,
 }
@@ -144,12 +147,15 @@ impl Config {
             unwind_cooldown_secs: parse_env("POLYBOT_UNWIND_COOLDOWN_SECS", "900")?,
             decay_enabled: parse_env("POLYBOT_DECAY_ENABLED", "true")?,
             decay_min_price: parse_env("POLYBOT_DECAY_MIN_PRICE", "0.80")?,
+            decay_sports_min_price: parse_env("POLYBOT_DECAY_SPORTS_MIN_PRICE", "0.90")?,
             decay_max_bet_usdc: parse_env("POLYBOT_DECAY_MAX_BET_USDC", "15.0")?,
-            decay_window_hours: parse_env("POLYBOT_DECAY_WINDOW_HOURS", "168.0")?,
+            decay_sports_max_bet_usdc: parse_env("POLYBOT_DECAY_SPORTS_MAX_BET_USDC", "5.0")?,
+            decay_window_hours: parse_env("POLYBOT_DECAY_WINDOW_HOURS", "24.0")?,
+            decay_sports_window_hours: parse_env("POLYBOT_DECAY_SPORTS_WINDOW_HOURS", "0.083")?,
             decay_nav_fraction: parse_env("POLYBOT_DECAY_NAV_FRACTION", "0.70")?,
             decay_excluded_tags: env_or(
                 "POLYBOT_DECAY_EXCLUDED_TAGS",
-                "crypto,sports,bitcoin,ethereum,btc,eth",
+                "crypto,bitcoin,ethereum,btc,eth",
             )
             .split(',')
             .map(|s| s.trim().to_lowercase())
@@ -286,11 +292,14 @@ pub fn test_config() -> Config {
         unwind_cooldown_secs: 900,
         decay_enabled: true,
         decay_min_price: 0.80,
+        decay_sports_min_price: 0.90,
         decay_max_bet_usdc: 15.0,
-        decay_window_hours: 168.0,
+        decay_sports_max_bet_usdc: 5.0,
+        decay_window_hours: 24.0,
+        decay_sports_window_hours: 0.083,
         decay_nav_fraction: 0.70,
         decay_excluded_tags: vec![
-            "crypto".into(), "sports".into(), "bitcoin".into(),
+            "crypto".into(), "bitcoin".into(),
             "ethereum".into(), "btc".into(), "eth".into(),
         ],
         socks5_proxy: None,
