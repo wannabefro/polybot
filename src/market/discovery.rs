@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use futures::StreamExt;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,12 +41,7 @@ pub struct TokenInfo {
 }
 
 /// Filters applied during discovery to build the tradable universe.
-fn passes_filter(
-    active: bool,
-    closed: bool,
-    accepting_orders: bool,
-    min_tick: Decimal,
-) -> bool {
+fn passes_filter(active: bool, closed: bool, accepting_orders: bool, min_tick: Decimal) -> bool {
     active && !closed && accepting_orders && min_tick > Decimal::ZERO
 }
 
@@ -101,7 +96,11 @@ async fn fetch_all_markets(client: &AuthClient, gamma_host: &str) -> Result<Vec<
             min_tick_size: m.minimum_tick_size,
             min_order_size: m.minimum_order_size,
             maker_fee_bps: m.maker_base_fee,
-            rewards_active: m.rewards.rates.iter().any(|r| r.rewards_daily_rate > Decimal::ZERO),
+            rewards_active: m
+                .rewards
+                .rates
+                .iter()
+                .any(|r| r.rewards_daily_rate > Decimal::ZERO),
             rewards_max_spread,
             rewards_min_size,
             // volume_24h not available from CLOB API; enriched via Gamma API later
@@ -123,7 +122,13 @@ fn parse_number(value: &Value) -> Option<f64> {
 }
 
 fn extract_volume_24h(value: &Value) -> Option<f64> {
-    const VOLUME_KEYS: [&str; 5] = ["volume24hr", "volume24h", "volume24Hr", "volume_24h", "volume"];
+    const VOLUME_KEYS: [&str; 5] = [
+        "volume24hr",
+        "volume24h",
+        "volume24Hr",
+        "volume_24h",
+        "volume",
+    ];
     for key in VOLUME_KEYS {
         if let Some(v) = value.get(key).and_then(parse_number) {
             return Some(v);
@@ -247,14 +252,21 @@ pub async fn enrich_volume(gamma_host: &str, markets: &mut [TradableMarket]) {
     if rate_limited > 0 {
         warn!(rate_limited, "discovery: gamma enrichment hit rate limits");
     }
-    debug!(enriched, total = enrich_count, "discovery: volume enrichment complete");
+    debug!(
+        enriched,
+        total = enrich_count,
+        "discovery: volume enrichment complete"
+    );
 }
 
 /// Spawn the discovery loop. Returns a watch receiver for the current universe.
 pub fn spawn(
     config: &Config,
     client: AuthClient,
-) -> (tokio::task::JoinHandle<()>, watch::Receiver<Arc<Vec<TradableMarket>>>) {
+) -> (
+    tokio::task::JoinHandle<()>,
+    watch::Receiver<Arc<Vec<TradableMarket>>>,
+) {
     let interval = config.discovery_interval;
     let gamma_host = config.gamma_host.clone();
     let (tx, rx) = watch::channel(Arc::new(Vec::new()));
@@ -265,7 +277,10 @@ pub fn spawn(
             ticker.tick().await;
             match fetch_all_markets(&client, &gamma_host).await {
                 Ok(markets) => {
-                    debug!(count = markets.len(), "discovery: refreshed tradable universe");
+                    debug!(
+                        count = markets.len(),
+                        "discovery: refreshed tradable universe"
+                    );
                     let _ = tx.send(Arc::new(markets));
                 }
                 Err(e) => {

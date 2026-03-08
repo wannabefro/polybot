@@ -47,7 +47,10 @@ pub struct RiskEngine {
 /// rather than silently bypassing limits at runtime.
 fn safe_nav_decimal(nav: f64, fraction: f64, label: &str) -> Decimal {
     let val = nav * fraction;
-    assert!(val.is_finite(), "risk limit {label} produced non-finite value: nav={nav}, fraction={fraction}");
+    assert!(
+        val.is_finite(),
+        "risk limit {label} produced non-finite value: nav={nav}, fraction={fraction}"
+    );
     Decimal::from_f64_retain(val)
         .unwrap_or_else(|| panic!("risk limit {label} failed Decimal conversion: {val}"))
 }
@@ -61,8 +64,13 @@ impl RiskEngine {
             config.effective_max_notional_per_market(),
             "per_market",
         );
-        let limit_gross = safe_nav_decimal(config.nav_usdc, config.effective_max_gross_exposure(), "gross");
-        let limit_daily_loss = safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "daily_loss");
+        let limit_gross = safe_nav_decimal(
+            config.nav_usdc,
+            config.effective_max_gross_exposure(),
+            "gross",
+        );
+        let limit_daily_loss =
+            safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "daily_loss");
         let limit_inventory = safe_nav_decimal(
             config.nav_usdc,
             config.effective_max_one_sided_inventory(),
@@ -113,12 +121,7 @@ impl RiskEngine {
         }
 
         // 2. Gross exposure cap (25% NAV default)
-        let gross: Decimal = self
-            .market_exposure
-            .read()
-            .values()
-            .map(|v| v.abs())
-            .sum();
+        let gross: Decimal = self.market_exposure.read().values().map(|v| v.abs()).sum();
         let gross_projected = gross - current.abs() + projected.abs();
         let lim_gross = *self.limit_gross.read();
         if gross_projected > lim_gross {
@@ -131,9 +134,7 @@ impl RiskEngine {
         let pnl = *self.daily_pnl.read();
         let lim_daily = *self.limit_daily_loss.read();
         if pnl < -lim_daily {
-            return RiskVerdict::Rejected(format!(
-                "daily loss stop: P&L {pnl} < -{lim_daily}"
-            ));
+            return RiskVerdict::Rejected(format!("daily loss stop: P&L {pnl} < -{lim_daily}"));
         }
 
         // 4. One-sided inventory cap (1% NAV default)
@@ -325,16 +326,10 @@ impl RiskEngine {
             cfg.effective_max_notional_per_market(),
             "per_market",
         );
-        *self.limit_gross.write() = safe_nav_decimal(
-            new_nav,
-            cfg.effective_max_gross_exposure(),
-            "gross",
-        );
-        *self.limit_daily_loss.write() = safe_nav_decimal(
-            new_nav,
-            cfg.daily_loss_stop,
-            "daily_loss",
-        );
+        *self.limit_gross.write() =
+            safe_nav_decimal(new_nav, cfg.effective_max_gross_exposure(), "gross");
+        *self.limit_daily_loss.write() =
+            safe_nav_decimal(new_nav, cfg.daily_loss_stop, "daily_loss");
         *self.limit_inventory.write() = safe_nav_decimal(
             new_nav,
             cfg.effective_max_one_sided_inventory(),
@@ -387,7 +382,13 @@ mod tests {
         let engine = RiskEngine::new(test_config());
         // Record a fill that uses most of the per-market allowance (2% NAV = 200)
         // Use small size so inventory check doesn't fire first
-        engine.record_fill("cond1", "12345", Side::Buy, Decimal::from(10), Decimal::from(190));
+        engine.record_fill(
+            "cond1",
+            "12345",
+            Side::Buy,
+            Decimal::from(10),
+            Decimal::from(190),
+        );
         let verdict = engine.check("cond1", &test_intent(0.50, 10.0));
         assert!(matches!(verdict, RiskVerdict::Approved));
         let verdict = engine.check("cond1", &test_intent(0.50, 30.0));
@@ -416,7 +417,13 @@ mod tests {
         let engine = RiskEngine::new(test_config());
         // 50% of 10000 = 5000; 25 markets × 200 = 5000
         for i in 0..25 {
-            engine.record_fill(&format!("cond{i}"), &format!("t{i}"), Side::Buy, Decimal::from(5), Decimal::from(200));
+            engine.record_fill(
+                &format!("cond{i}"),
+                &format!("t{i}"),
+                Side::Buy,
+                Decimal::from(5),
+                Decimal::from(200),
+            );
         }
         let verdict = engine.check("cond_new", &test_intent(1.0, 200.0));
         assert!(matches!(verdict, RiskVerdict::Rejected(_)));
@@ -426,7 +433,13 @@ mod tests {
     fn separate_markets_have_separate_limits() {
         let engine = RiskEngine::new(test_config());
         // Use a different token so cond2 check on "12345" has clean inventory
-        engine.record_fill("cond1", "other_token", Side::Buy, Decimal::from(5), Decimal::from(190));
+        engine.record_fill(
+            "cond1",
+            "other_token",
+            Side::Buy,
+            Decimal::from(5),
+            Decimal::from(190),
+        );
         let verdict = engine.check("cond2", &test_intent(0.50, 100.0));
         assert!(matches!(verdict, RiskVerdict::Approved));
     }
@@ -483,7 +496,13 @@ mod tests {
         let engine = RiskEngine::new(test_config());
         // max_one_sided_inventory = 0.04 → 4% of 10000 = 400 USDC
         // Buy 800 shares at 0.50 = 400 notional inventory
-        engine.record_fill("cond1", "token1", Side::Buy, Decimal::from(800), Decimal::from(400));
+        engine.record_fill(
+            "cond1",
+            "token1",
+            Side::Buy,
+            Decimal::from(800),
+            Decimal::from(400),
+        );
         // Another buy of 10 at 0.50 would push inventory to 405 > 400
         let intent = OrderIntent {
             token_id: "token1".into(),
@@ -503,7 +522,13 @@ mod tests {
     fn one_sided_inventory_sell_reduces() {
         let engine = RiskEngine::new(test_config());
         // Long 300 shares at 0.50 = 150 notional (under per-market limit of 200)
-        engine.record_fill("cond1", "token1", Side::Buy, Decimal::from(300), Decimal::from(150));
+        engine.record_fill(
+            "cond1",
+            "token1",
+            Side::Buy,
+            Decimal::from(300),
+            Decimal::from(150),
+        );
         // Selling reduces inventory — should pass
         let intent = sell_intent("token1", 0.50, 100.0);
         let verdict = engine.check("cond1", &intent);
@@ -514,7 +539,13 @@ mod tests {
     fn one_sided_inventory_short_limit() {
         let engine = RiskEngine::new(test_config());
         // Short 800 shares at 0.50 = 400 notional
-        engine.record_fill("cond1", "token1", Side::Sell, Decimal::from(800), Decimal::from(400));
+        engine.record_fill(
+            "cond1",
+            "token1",
+            Side::Sell,
+            Decimal::from(800),
+            Decimal::from(400),
+        );
         // More selling would push past limit
         let intent = sell_intent("token1", 0.50, 10.0);
         let verdict = engine.check("cond1", &intent);
@@ -525,7 +556,13 @@ mod tests {
     fn per_market_derisking_sell_is_allowed() {
         let engine = RiskEngine::new(test_config());
         // Build long exposure near the per-market cap (2% of 10_000 = 200).
-        engine.record_fill("cond1", "token1", Side::Buy, Decimal::from(190), Decimal::from(190));
+        engine.record_fill(
+            "cond1",
+            "token1",
+            Side::Buy,
+            Decimal::from(190),
+            Decimal::from(190),
+        );
 
         // This sell reduces net market exposure from +190 to +90.
         let intent = sell_intent("token1", 1.0, 100.0);
@@ -550,7 +587,13 @@ mod tests {
                 Decimal::from(200),
             );
         }
-        engine.record_fill("cond_x", "token_x", Side::Buy, Decimal::from(50), Decimal::from(50));
+        engine.record_fill(
+            "cond_x",
+            "token_x",
+            Side::Buy,
+            Decimal::from(50),
+            Decimal::from(50),
+        );
 
         // Sell 80 on cond_x reduces net cond_x from +50 to -30 and gross from 2450 to 2430.
         let intent = OrderIntent {
@@ -623,8 +666,20 @@ mod tests {
     #[test]
     fn inventory_snapshot_returns_all_tokens() {
         let engine = RiskEngine::new(test_config());
-        engine.record_fill("cond1", "token_a", Side::Buy, Decimal::from(50), Decimal::from(25));
-        engine.record_fill("cond1", "token_b", Side::Sell, Decimal::from(30), Decimal::from(15));
+        engine.record_fill(
+            "cond1",
+            "token_a",
+            Side::Buy,
+            Decimal::from(50),
+            Decimal::from(25),
+        );
+        engine.record_fill(
+            "cond1",
+            "token_b",
+            Side::Sell,
+            Decimal::from(30),
+            Decimal::from(15),
+        );
 
         let snapshot = engine.inventory_snapshot();
         assert_eq!(snapshot.len(), 2);
@@ -666,17 +721,43 @@ mod tests {
     fn pre_computed_limits_match_config() {
         let config = test_config();
         let engine = RiskEngine::new(config.clone());
-        assert_eq!(*engine.limit_per_market.read(), safe_nav_decimal(config.nav_usdc, config.effective_max_notional_per_market(), "pm"));
-        assert_eq!(*engine.limit_gross.read(), safe_nav_decimal(config.nav_usdc, config.effective_max_gross_exposure(), "ge"));
-        assert_eq!(*engine.limit_daily_loss.read(), safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "dl"));
-        assert_eq!(*engine.limit_inventory.read(), safe_nav_decimal(config.nav_usdc, config.effective_max_one_sided_inventory(), "inv"));
+        assert_eq!(
+            *engine.limit_per_market.read(),
+            safe_nav_decimal(
+                config.nav_usdc,
+                config.effective_max_notional_per_market(),
+                "pm"
+            )
+        );
+        assert_eq!(
+            *engine.limit_gross.read(),
+            safe_nav_decimal(config.nav_usdc, config.effective_max_gross_exposure(), "ge")
+        );
+        assert_eq!(
+            *engine.limit_daily_loss.read(),
+            safe_nav_decimal(config.nav_usdc, config.daily_loss_stop, "dl")
+        );
+        assert_eq!(
+            *engine.limit_inventory.read(),
+            safe_nav_decimal(
+                config.nav_usdc,
+                config.effective_max_one_sided_inventory(),
+                "inv"
+            )
+        );
     }
 
     #[test]
     fn mark_to_market_pnl_tracks_inventory_and_cashflow() {
         let engine = RiskEngine::new(test_config());
         // Buy 100 @ 0.50 => cashflow -50, inventory +100
-        engine.record_fill("cond1", "token1", Side::Buy, Decimal::from(100), Decimal::from(50));
+        engine.record_fill(
+            "cond1",
+            "token1",
+            Side::Buy,
+            Decimal::from(100),
+            Decimal::from(50),
+        );
 
         let mut mids = HashMap::new();
         mids.insert("token1".into(), "0.60".parse::<Decimal>().unwrap());
@@ -715,7 +796,10 @@ mod tests {
         // Small account at $100: 8% × 100 = $8
         let mut small_cfg = config.clone();
         small_cfg.nav_usdc = 100.0;
-        assert_eq!(per_market, safe_nav_decimal(100.0, small_cfg.effective_max_notional_per_market(), "pm"));
+        assert_eq!(
+            per_market,
+            safe_nav_decimal(100.0, small_cfg.effective_max_notional_per_market(), "pm")
+        );
     }
 
     #[test]

@@ -1,9 +1,8 @@
-
 use anyhow::Result;
 use polymarket_client_sdk::clob::types::{Amount, OrderType, Side};
 use polymarket_client_sdk::types::U256;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use tracing::{debug, warn};
 
 use crate::auth::{AuthClient, AuthContext};
@@ -60,7 +59,11 @@ pub async fn place_maker_order(ctx: &AuthContext, intent: &OrderIntent) -> Resul
             Side::Buy => {
                 let cost = (intent.size * intent.price).trunc_with_scale(2);
                 if cost <= rust_decimal::Decimal::ZERO {
-                    anyhow::bail!("FOK buy cost rounds to $0 — size={} price={}", intent.size, intent.price);
+                    anyhow::bail!(
+                        "FOK buy cost rounds to $0 — size={} price={}",
+                        intent.size,
+                        intent.price
+                    );
                 }
                 Amount::usdc(cost)?
             }
@@ -128,10 +131,7 @@ pub async fn cancel_batch(client: &AuthClient, order_ids: &[String]) -> Result<u
 
 /// Place multiple orders in a single batch API call. Returns results per order.
 #[allow(dead_code)]
-pub async fn place_batch(
-    ctx: &AuthContext,
-    intents: &[OrderIntent],
-) -> Vec<Result<OrderResult>> {
+pub async fn place_batch(ctx: &AuthContext, intents: &[OrderIntent]) -> Vec<Result<OrderResult>> {
     if intents.is_empty() {
         return Vec::new();
     }
@@ -193,7 +193,8 @@ pub async fn place_batch(
     match client.post_orders(signed_orders).await {
         Ok(responses) => {
             for (resp, &idx) in responses.iter().zip(valid_indices.iter()) {
-                let matched = resp.status == polymarket_client_sdk::clob::types::OrderStatusType::Matched;
+                let matched =
+                    resp.status == polymarket_client_sdk::clob::types::OrderStatusType::Matched;
                 debug!(
                     order_id = %resp.order_id,
                     side = ?intents[idx].side,
@@ -219,7 +220,10 @@ pub async fn place_batch(
         }
     }
 
-    results.into_iter().map(|r| r.unwrap_or_else(|| Err(anyhow::anyhow!("unreachable")))).collect()
+    results
+        .into_iter()
+        .map(|r| r.unwrap_or_else(|| Err(anyhow::anyhow!("unreachable"))))
+        .collect()
 }
 
 /// Cancel a specific order.

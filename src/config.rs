@@ -94,48 +94,42 @@ impl Config {
             max_gross_exposure: parse_env("POLYBOT_MAX_GROSS_PCT", "0.50")?,
             max_one_sided_inventory: parse_env("POLYBOT_MAX_INVENTORY_PCT", "0.04")?,
             daily_loss_stop: parse_env("POLYBOT_DAILY_LOSS_PCT", "0.05")?,
-            heartbeat_interval: Duration::from_secs(
-                parse_env("POLYBOT_HEARTBEAT_SECS", "5")?,
-            ),
-            geoblock_poll_interval: Duration::from_secs(
-                parse_env("POLYBOT_GEOBLOCK_POLL_SECS", "900")?,
-            ),
-            discovery_interval: Duration::from_secs(
-                parse_env("POLYBOT_DISCOVERY_SECS", "60")?,
-            ),
-            position_recon_interval: Duration::from_secs(
-                parse_env("POLYBOT_RECON_SECS", "45")?,
-            ),
-            stale_feed_threshold: Duration::from_millis(
-                parse_env("POLYBOT_STALE_FEED_MS", "1500")?,
-            ),
+            heartbeat_interval: Duration::from_secs(parse_env("POLYBOT_HEARTBEAT_SECS", "5")?),
+            geoblock_poll_interval: Duration::from_secs(parse_env(
+                "POLYBOT_GEOBLOCK_POLL_SECS",
+                "900",
+            )?),
+            discovery_interval: Duration::from_secs(parse_env("POLYBOT_DISCOVERY_SECS", "60")?),
+            position_recon_interval: Duration::from_secs(parse_env("POLYBOT_RECON_SECS", "45")?),
+            stale_feed_threshold: Duration::from_millis(parse_env(
+                "POLYBOT_STALE_FEED_MS",
+                "1500",
+            )?),
             mean_revert_max_nav_frac: parse_env("POLYBOT_MR_MAX_NAV_PCT", "0.005")?,
             mean_revert_min_volume_24h: parse_env("POLYBOT_MR_MIN_VOL_24H", "10000.0")?,
-            hedge_timeout: Duration::from_secs(
-                parse_env("POLYBOT_HEDGE_TIMEOUT_SECS", "120")?,
-            ),
+            hedge_timeout: Duration::from_secs(parse_env("POLYBOT_HEDGE_TIMEOUT_SECS", "120")?),
             rate_limit_per_sec: parse_env("POLYBOT_RATE_LIMIT_PS", "70.0")?,
-            llm_poll_interval: Duration::from_secs(
-                parse_env("POLYBOT_LLM_POLL_SECS", "10")?,
-            ),
-            metrics_interval: Duration::from_secs(
-                parse_env("POLYBOT_METRICS_SECS", "60")?,
-            ),
+            llm_poll_interval: Duration::from_secs(parse_env("POLYBOT_LLM_POLL_SECS", "10")?),
+            metrics_interval: Duration::from_secs(parse_env("POLYBOT_METRICS_SECS", "60")?),
             mm_min_size: parse_env("POLYBOT_MM_MIN_SIZE", "1.0")?,
             reward_min_size: parse_env("POLYBOT_REWARD_MIN_SIZE", "1.0")?,
             reward_min_nav_usdc: parse_env("POLYBOT_REWARD_MIN_NAV_USDC", "25.0")?,
             mean_revert_min_nav_usdc: parse_env("POLYBOT_MR_MIN_NAV_USDC", "100.0")?,
             small_account_nav_threshold: parse_env("POLYBOT_SMALL_ACCOUNT_NAV_THRESHOLD", "500.0")?,
-            small_account_min_per_market_pct: parse_env("POLYBOT_SMALL_MIN_PER_MARKET_PCT", "0.12")?,
+            small_account_min_per_market_pct: parse_env(
+                "POLYBOT_SMALL_MIN_PER_MARKET_PCT",
+                "0.12",
+            )?,
             small_account_min_inventory_pct: parse_env("POLYBOT_SMALL_MIN_INVENTORY_PCT", "0.10")?,
             neg_risk_stale_secs: parse_env("POLYBOT_NR_STALE_SECS", "10")?,
             quote_tick_secs: parse_env("POLYBOT_QUOTE_TICK_SECS", "10")?,
-            quote_max_age: Duration::from_secs(
-                parse_env("POLYBOT_QUOTE_MAX_AGE_SECS", "60")?,
-            ),
+            quote_max_age: Duration::from_secs(parse_env("POLYBOT_QUOTE_MAX_AGE_SECS", "60")?),
             max_ws_tokens: parse_env("POLYBOT_MAX_WS_TOKENS", "500")?,
             scalper_min_spread_ticks: parse_env("POLYBOT_SCALPER_MIN_SPREAD_TICKS", "4")?,
-            scalper_min_touch_notional_usdc: parse_env("POLYBOT_SCALPER_MIN_TOUCH_NOTIONAL_USDC", "10.0")?,
+            scalper_min_touch_notional_usdc: parse_env(
+                "POLYBOT_SCALPER_MIN_TOUCH_NOTIONAL_USDC",
+                "10.0",
+            )?,
             scalper_min_vol_24h: parse_env("POLYBOT_SCALPER_MIN_VOL_24H", "1000.0")?,
             scalper_max_vol_24h: parse_env("POLYBOT_SCALPER_MAX_VOL_24H", "250000.0")?,
             scalper_refresh_secs: parse_env("POLYBOT_SCALPER_REFRESH_SECS", "30")?,
@@ -146,7 +140,7 @@ impl Config {
             unwind_hard_stop_secs: parse_env("POLYBOT_UNWIND_HARD_STOP_SECS", "120")?,
             unwind_cooldown_secs: parse_env("POLYBOT_UNWIND_COOLDOWN_SECS", "900")?,
             decay_enabled: parse_env("POLYBOT_DECAY_ENABLED", "true")?,
-            decay_min_price: parse_env("POLYBOT_DECAY_MIN_PRICE", "0.80")?,
+            decay_min_price: parse_env("POLYBOT_DECAY_MIN_PRICE", "0.85")?,
             decay_sports_min_price: parse_env("POLYBOT_DECAY_SPORTS_MIN_PRICE", "0.90")?,
             decay_max_bet_usdc: parse_env("POLYBOT_DECAY_MAX_BET_USDC", "15.0")?,
             decay_sports_max_bet_usdc: parse_env("POLYBOT_DECAY_SPORTS_MAX_BET_USDC", "5.0")?,
@@ -166,9 +160,7 @@ impl Config {
                 let user = std::env::var("NORDVPN_USERNAME").ok();
                 let pass = std::env::var("NORDVPN_PASSWORD").ok();
                 match (host, user, pass) {
-                    (Some(h), Some(u), Some(p)) => {
-                        Some(format!("socks5://{u}:{p}@{h}:1080"))
-                    }
+                    (Some(h), Some(u), Some(p)) => Some(format!("socks5://{u}:{p}@{h}:1080")),
                     _ => std::env::var("POLYBOT_SOCKS5_PROXY").ok(),
                 }
             },
@@ -291,7 +283,7 @@ pub fn test_config() -> Config {
         unwind_hard_stop_secs: 120,
         unwind_cooldown_secs: 900,
         decay_enabled: true,
-        decay_min_price: 0.80,
+        decay_min_price: 0.85,
         decay_sports_min_price: 0.90,
         decay_max_bet_usdc: 15.0,
         decay_sports_max_bet_usdc: 5.0,
@@ -299,8 +291,11 @@ pub fn test_config() -> Config {
         decay_sports_window_hours: 0.083,
         decay_nav_fraction: 0.70,
         decay_excluded_tags: vec![
-            "crypto".into(), "bitcoin".into(),
-            "ethereum".into(), "btc".into(), "eth".into(),
+            "crypto".into(),
+            "bitcoin".into(),
+            "ethereum".into(),
+            "btc".into(),
+            "eth".into(),
         ],
         socks5_proxy: None,
     }
@@ -342,7 +337,10 @@ pub(crate) mod tests {
         let result = Config::from_env();
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("POLYBOT_PRIVATE_KEY"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("POLYBOT_PRIVATE_KEY"),
             "error should mention the missing env var"
         );
 
@@ -381,9 +379,9 @@ pub(crate) mod tests {
     fn default_risk_limits_match_plan() {
         let cfg = test_config();
         assert_eq!(cfg.max_notional_per_market, 0.02); // 2%
-        assert_eq!(cfg.max_gross_exposure, 0.50);       // 50%
-        assert_eq!(cfg.max_one_sided_inventory, 0.04);  // 4%
-        assert_eq!(cfg.daily_loss_stop, 0.05);           // 5%
+        assert_eq!(cfg.max_gross_exposure, 0.50); // 50%
+        assert_eq!(cfg.max_one_sided_inventory, 0.04); // 4%
+        assert_eq!(cfg.daily_loss_stop, 0.05); // 5%
         assert_eq!(cfg.mean_revert_max_nav_frac, 0.005); // 0.5%
     }
 
@@ -402,8 +400,14 @@ pub(crate) mod tests {
     fn effective_caps_unchanged_for_large_accounts() {
         let cfg = test_config();
         assert!(!cfg.is_small_account());
-        assert_eq!(cfg.effective_max_notional_per_market(), cfg.max_notional_per_market);
-        assert_eq!(cfg.effective_max_one_sided_inventory(), cfg.max_one_sided_inventory);
+        assert_eq!(
+            cfg.effective_max_notional_per_market(),
+            cfg.max_notional_per_market
+        );
+        assert_eq!(
+            cfg.effective_max_one_sided_inventory(),
+            cfg.max_one_sided_inventory
+        );
         assert_eq!(cfg.effective_max_gross_exposure(), cfg.max_gross_exposure);
         assert_eq!(cfg.max_active_markets(), usize::MAX);
     }

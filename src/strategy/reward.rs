@@ -137,17 +137,20 @@ impl HedgeTracker {
     /// condition_id (different token), match sizes and remove hedged portion.
     pub fn record_fill(&mut self, fill: UnhedgedFill) {
         // Check if there's already a fill on the same condition but different token
-        let complement_idx = self.unhedged.iter().position(|f| {
-            f.condition_id == fill.condition_id && f.token_id != fill.token_id
-        });
+        let complement_idx = self
+            .unhedged
+            .iter()
+            .position(|f| f.condition_id == fill.condition_id && f.token_id != fill.token_id);
 
         if let Some(idx) = complement_idx {
             let hedge_size = fill.size.min(self.unhedged[idx].size);
             info!(
                 "🔒 HEDGED condition={} ({}@{} + {}@{})",
                 fill.condition_id,
-                self.unhedged[idx].size, self.unhedged[idx].price,
-                fill.size, fill.price,
+                self.unhedged[idx].size,
+                self.unhedged[idx].price,
+                fill.size,
+                fill.price,
             );
 
             // Reduce or remove existing fill
@@ -237,7 +240,10 @@ impl HedgeTracker {
     /// Get condition_ids that have unhedged single-sided fills.
     /// Markets with these conditions should NOT receive new quotes.
     pub fn unhedged_conditions(&self) -> HashSet<String> {
-        self.unhedged.iter().map(|f| f.condition_id.clone()).collect()
+        self.unhedged
+            .iter()
+            .map(|f| f.condition_id.clone())
+            .collect()
     }
 
     #[allow(dead_code)]
@@ -374,9 +380,9 @@ fn evaluate_binary_reward(
     let reward_min = Decimal::from_f64_retain(config.reward_min_size).unwrap_or(dec!(3));
     let mid = (best_bid0 + best_ask0) / Decimal::TWO;
     let mut size = market.min_order_size.max(rewards_min).max(reward_min);
-    let inventory_cap_notional = Decimal::from_f64_retain(
-        config.nav_limit(config.effective_max_one_sided_inventory())
-    ).unwrap_or(Decimal::ZERO);
+    let inventory_cap_notional =
+        Decimal::from_f64_retain(config.nav_limit(config.effective_max_one_sided_inventory()))
+            .unwrap_or(Decimal::ZERO);
     if !mid.is_zero() && inventory_cap_notional > Decimal::ZERO {
         size = size.min(inventory_cap_notional / mid);
     }
@@ -466,9 +472,9 @@ fn evaluate_single_buy_reward(
     let reward_min = Decimal::from_f64_retain(config.reward_min_size).unwrap_or(dec!(3));
     let mid = (best_bid + best_ask) / Decimal::TWO;
     let mut size = market.min_order_size.max(rewards_min).max(reward_min);
-    let inventory_cap_notional = Decimal::from_f64_retain(
-        config.nav_limit(config.effective_max_one_sided_inventory())
-    ).unwrap_or(Decimal::ZERO);
+    let inventory_cap_notional =
+        Decimal::from_f64_retain(config.nav_limit(config.effective_max_one_sided_inventory()))
+            .unwrap_or(Decimal::ZERO);
     if !mid.is_zero() && inventory_cap_notional > Decimal::ZERO {
         size = size.min(inventory_cap_notional / mid);
     }
@@ -514,7 +520,7 @@ mod tests {
     use super::*;
     use crate::config::tests::test_config;
     use crate::market::book::BookStore;
-    use crate::market::discovery::{TradableMarket, TokenInfo};
+    use crate::market::discovery::{TokenInfo, TradableMarket};
     use crate::risk::guardrails::RiskEngine;
     use polymarket_client_sdk::clob::ws::types::response::{BookUpdate, OrderBookLevel};
     use polymarket_client_sdk::types::{B256, U256};
@@ -598,9 +604,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         };
         assert!(!fill.hedge_expired(Duration::from_secs(300)));
     }
@@ -616,9 +622,9 @@ mod tests {
             filled_at: Instant::now() - Duration::from_secs(301),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         };
         assert!(fill.hedge_expired(Duration::from_secs(300)));
     }
@@ -634,9 +640,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         };
         let books = make_book_store("0.48", "0.52");
         let intent = fill.unwind_intent(&books, UnwindStage::Stage1).unwrap();
@@ -657,9 +663,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: true,
             fee_rate_bps: dec!(20),
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         };
         let books = make_book_store("0.48", "0.52");
         let intent = fill.unwind_intent(&books, UnwindStage::Stage1).unwrap();
@@ -678,9 +684,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         };
         let books = BookStore::new();
         assert!(fill.unwind_intent(&books, UnwindStage::Stage1).is_none());
@@ -702,9 +708,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
         assert_eq!(tracker.unhedged_count(), 1);
     }
@@ -723,9 +729,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
         assert_eq!(tracker.unhedged_count(), 1);
 
@@ -739,9 +745,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
         assert_eq!(tracker.unhedged_count(), 0); // both removed
     }
@@ -759,9 +765,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
         tracker.record_fill(UnhedgedFill {
             token_id: "t2".into(),
@@ -772,9 +778,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
         assert_eq!(tracker.unhedged_count(), 2); // different conditions, not matched
     }
@@ -791,9 +797,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
         tracker.mark_hedged("t1");
         assert_eq!(tracker.unhedged_count(), 0);
@@ -813,9 +819,9 @@ mod tests {
             filled_at: Instant::now() - Duration::from_secs(1),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
         // Fresh fill (not expired)
         tracker.record_fill(UnhedgedFill {
@@ -827,9 +833,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
 
         let books = make_book_store("0.48", "0.52");
@@ -918,7 +924,11 @@ mod tests {
             Duration::from_secs(3),
         );
         assert_eq!(unwinds.len(), 1);
-        assert_eq!(tracker.unhedged_count(), 1, "tracker must remain unhedged until fill confirmation");
+        assert_eq!(
+            tracker.unhedged_count(),
+            1,
+            "tracker must remain unhedged until fill confirmation"
+        );
     }
 
     #[test]
@@ -933,9 +943,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
         tracker.clear();
         assert_eq!(tracker.unhedged_count(), 0);
@@ -955,9 +965,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
 
         let blocked = tracker.unhedged_conditions();
@@ -974,9 +984,9 @@ mod tests {
             filled_at: Instant::now(),
             neg_risk: false,
             fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+            tick_size: dec!(0.01),
+            unwind_attempts: 0,
+            hard_stop_failures: 0,
         });
         assert!(tracker.unhedged_conditions().is_empty());
     }
@@ -1052,7 +1062,10 @@ mod tests {
 
         let result = evaluate_reward_quote(&config, &market, &books, &risk);
         if let Some((bid, ask)) = result.first() {
-            assert!(ask.price - bid.price <= dec!(0.01), "spread should be tightened to max_spread");
+            assert!(
+                ask.price - bid.price <= dec!(0.01),
+                "spread should be tightened to max_spread"
+            );
         }
         // Either tightened or returned None — both are valid
     }

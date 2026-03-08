@@ -20,10 +20,7 @@ pub struct DetectedFill {
 /// Poll the CLOB for order statuses and return any that have new fills.
 /// `order_ids` should be the IDs of active resting orders.
 /// Returns fills for orders where `size_matched > 0`.
-pub async fn detect_fills(
-    client: &AuthClient,
-    order_ids: &[String],
-) -> Vec<DetectedFill> {
+pub async fn detect_fills(client: &AuthClient, order_ids: &[String]) -> Vec<DetectedFill> {
     let mut fills = Vec::new();
 
     for order_id in order_ids {

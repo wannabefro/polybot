@@ -102,10 +102,15 @@ impl OrderRouter {
 
     /// Place multiple orders in a single batch API call.
     #[allow(dead_code)]
-    pub async fn place_batch(&self, intents: &[OrderIntent], books: &BookStore) -> Vec<Result<PlaceResult>> {
+    pub async fn place_batch(
+        &self,
+        intents: &[OrderIntent],
+        books: &BookStore,
+    ) -> Vec<Result<PlaceResult>> {
         match self {
-            Self::Paper(engine) => {
-                intents.iter().map(|intent| {
+            Self::Paper(engine) => intents
+                .iter()
+                .map(|intent| {
                     let (id, paper_fill) = engine.place_order(intent, books);
                     Ok(PlaceResult {
                         order_id: id,
@@ -115,10 +120,12 @@ impl OrderRouter {
                         fill_size: Decimal::ZERO,
                         fill_notional: Decimal::ZERO,
                     })
-                }).collect()
-            }
-            Self::Live(ctx) => {
-                pipeline::place_batch(ctx, intents).await.into_iter().map(|r| {
+                })
+                .collect(),
+            Self::Live(ctx) => pipeline::place_batch(ctx, intents)
+                .await
+                .into_iter()
+                .map(|r| {
                     r.map(|result| PlaceResult {
                         order_id: result.order_id,
                         paper_fill: None,
@@ -127,8 +134,8 @@ impl OrderRouter {
                         fill_size: result.making_amount,
                         fill_notional: result.taking_amount,
                     })
-                }).collect()
-            }
+                })
+                .collect(),
         }
     }
 
@@ -248,7 +255,10 @@ mod tests {
             fee_rate_bps: Decimal::ZERO,
         };
         let result = router.place(&crossing_intent, &books).await.unwrap();
-        assert!(result.paper_fill.is_some(), "crossing order should fill immediately");
+        assert!(
+            result.paper_fill.is_some(),
+            "crossing order should fill immediately"
+        );
         let fill = result.paper_fill.unwrap();
         assert_eq!(fill.size, dec!(10));
     }

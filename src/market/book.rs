@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::RwLock;
+use polymarket_client_sdk::clob::types::response::OrderBookSummaryResponse;
 use polymarket_client_sdk::clob::ws::types::response::BookUpdate;
 use rust_decimal::Decimal;
 use tracing::{debug, warn};
@@ -76,16 +77,19 @@ impl BookStore {
         }
     }
 
-    /// Apply a BookUpdate from the WebSocket feed.
-    /// Rejects timestamp regressions (stale/replayed data).
-    /// Returns false if the update was rejected.
-    pub fn apply(&self, asset_id: &str, update: &BookUpdate) -> bool {
-        // Check timestamp regression
+    fn upsert(
+        &self,
+        asset_id: &str,
+        bids: BookSide,
+        asks: BookSide,
+        hash: Option<String>,
+        timestamp_ms: i64,
+    ) -> bool {
         if let Some(existing) = self.inner.read().get(asset_id) {
-            if update.timestamp < existing.timestamp_ms {
+            if timestamp_ms < existing.timestamp_ms {
                 warn!(
                     asset_id,
-                    new_ts = update.timestamp,
+                    new_ts = timestamp_ms,
                     old_ts = existing.timestamp_ms,
                     "book: rejected timestamp regression"
                 );
@@ -93,6 +97,24 @@ impl BookStore {
             }
         }
 
+        let book = LocalBook {
+            asset_id: asset_id.to_string(),
+            bids,
+            asks,
+            last_update: Instant::now(),
+            hash,
+            timestamp_ms,
+        };
+
+        debug!(asset_id, mid = ?book.mid_price(), "book: updated");
+        self.inner.write().insert(asset_id.to_string(), book);
+        true
+    }
+
+    /// Apply a BookUpdate from the WebSocket feed.
+    /// Rejects timestamp regressions (stale/replayed data).
+    /// Returns false if the update was rejected.
+    pub fn apply(&self, asset_id: &str, update: &BookUpdate) -> bool {
         let bids = BookSide {
             levels: {
                 let mut lvls: Vec<Level> = update
@@ -124,18 +146,49 @@ impl BookStore {
             },
         };
 
-        let book = LocalBook {
-            asset_id: asset_id.to_string(),
-            bids,
-            asks,
-            last_update: Instant::now(),
-            hash: update.hash.clone(),
-            timestamp_ms: update.timestamp,
+        self.upsert(asset_id, bids, asks, update.hash.clone(), update.timestamp)
+    }
+
+    /// Apply an authoritative REST orderbook snapshot.
+    /// Rejects timestamp regressions (stale/replayed data).
+    pub fn apply_snapshot(&self, snapshot: &OrderBookSummaryResponse) -> bool {
+        let asset_id = snapshot.asset_id.to_string();
+        let bids = BookSide {
+            levels: {
+                let mut lvls: Vec<Level> = snapshot
+                    .bids
+                    .iter()
+                    .map(|l| Level {
+                        price: l.price,
+                        size: l.size,
+                    })
+                    .collect();
+                lvls.sort_by(|a, b| b.price.cmp(&a.price));
+                lvls
+            },
+        };
+        let asks = BookSide {
+            levels: {
+                let mut lvls: Vec<Level> = snapshot
+                    .asks
+                    .iter()
+                    .map(|l| Level {
+                        price: l.price,
+                        size: l.size,
+                    })
+                    .collect();
+                lvls.sort_by(|a, b| a.price.cmp(&b.price));
+                lvls
+            },
         };
 
-        debug!(asset_id, mid = ?book.mid_price(), "book: updated");
-        self.inner.write().insert(asset_id.to_string(), book);
-        true
+        self.upsert(
+            &asset_id,
+            bids,
+            asks,
+            snapshot.hash.clone(),
+            snapshot.timestamp.timestamp_millis(),
+        )
     }
 
     /// Get a snapshot of the book for an asset.
@@ -155,7 +208,11 @@ impl BookStore {
 
     /// Count how many books have a valid mid price (both bids and asks).
     pub fn count_quotable(&self) -> usize {
-        self.inner.read().values().filter(|b| b.mid_price().is_some()).count()
+        self.inner
+            .read()
+            .values()
+            .filter(|b| b.mid_price().is_some())
+            .count()
     }
 
     /// Total number of tracked books.
@@ -203,6 +260,9 @@ impl BookStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use polymarket_client_sdk::clob::types::response::{OrderBookSummaryResponse, OrderSummary};
+    use polymarket_client_sdk::clob::types::TickSize;
     use polymarket_client_sdk::clob::ws::types::response::{BookUpdate, OrderBookLevel};
     use polymarket_client_sdk::types::{B256, U256};
     use rust_decimal_macros::dec;
@@ -223,6 +283,50 @@ mod tests {
             .asks(asks.into_iter().map(|(p, s)| make_level(p, s)).collect())
             .hash("abc123".into())
             .build()
+    }
+
+    fn make_snapshot(
+        asset_id: U256,
+        bids: Vec<(&str, &str)>,
+        asks: Vec<(&str, &str)>,
+        timestamp_ms: i64,
+        hash: Option<&str>,
+    ) -> OrderBookSummaryResponse {
+        let builder = OrderBookSummaryResponse::builder()
+            .market(B256::ZERO)
+            .asset_id(asset_id)
+            .timestamp(
+                chrono::DateTime::<Utc>::from_timestamp_millis(timestamp_ms)
+                    .expect("valid timestamp"),
+            )
+            .bids(
+                bids.into_iter()
+                    .map(|(price, size)| {
+                        OrderSummary::builder()
+                            .price(price.parse::<Decimal>().unwrap())
+                            .size(size.parse::<Decimal>().unwrap())
+                            .build()
+                    })
+                    .collect(),
+            )
+            .asks(
+                asks.into_iter()
+                    .map(|(price, size)| {
+                        OrderSummary::builder()
+                            .price(price.parse::<Decimal>().unwrap())
+                            .size(size.parse::<Decimal>().unwrap())
+                            .build()
+                    })
+                    .collect(),
+            )
+            .min_order_size(dec!(1))
+            .neg_risk(false)
+            .tick_size(TickSize::Hundredth);
+        if let Some(hash) = hash {
+            builder.hash(hash.to_string()).build()
+        } else {
+            builder.build()
+        }
     }
 
     #[test]
@@ -300,8 +404,14 @@ mod tests {
     #[test]
     fn update_replaces_previous() {
         let store = BookStore::new();
-        store.apply("token1", &make_update(vec![("0.48", "100")], vec![("0.52", "100")]));
-        store.apply("token1", &make_update(vec![("0.49", "200")], vec![("0.51", "200")]));
+        store.apply(
+            "token1",
+            &make_update(vec![("0.48", "100")], vec![("0.52", "100")]),
+        );
+        store.apply(
+            "token1",
+            &make_update(vec![("0.49", "200")], vec![("0.51", "200")]),
+        );
 
         let book = store.get("token1").unwrap();
         assert_eq!(book.bids.best().unwrap().price, dec!(0.49));
@@ -313,8 +423,14 @@ mod tests {
     #[test]
     fn all_mids_across_tokens() {
         let store = BookStore::new();
-        store.apply("t1", &make_update(vec![("0.48", "100")], vec![("0.52", "100")]));
-        store.apply("t2", &make_update(vec![("0.30", "50")], vec![("0.40", "50")]));
+        store.apply(
+            "t1",
+            &make_update(vec![("0.48", "100")], vec![("0.52", "100")]),
+        );
+        store.apply(
+            "t2",
+            &make_update(vec![("0.30", "50")], vec![("0.40", "50")]),
+        );
         store.apply("t3", &make_update(vec![], vec![]));
 
         let mids = store.all_mids();
@@ -326,9 +442,18 @@ mod tests {
     #[test]
     fn retain_removes_stale_assets() {
         let store = BookStore::new();
-        store.apply("t1", &make_update(vec![("0.48", "100")], vec![("0.52", "100")]));
-        store.apply("t2", &make_update(vec![("0.30", "50")], vec![("0.40", "50")]));
-        store.apply("t3", &make_update(vec![("0.60", "50")], vec![("0.70", "50")]));
+        store.apply(
+            "t1",
+            &make_update(vec![("0.48", "100")], vec![("0.52", "100")]),
+        );
+        store.apply(
+            "t2",
+            &make_update(vec![("0.30", "50")], vec![("0.40", "50")]),
+        );
+        store.apply(
+            "t3",
+            &make_update(vec![("0.60", "50")], vec![("0.70", "50")]),
+        );
 
         store.retain(&["t1".into(), "t3".into()]);
         assert!(store.get("t1").is_some());
@@ -354,11 +479,7 @@ mod tests {
 
     // ── New: timestamp regression tests ──
 
-    fn make_update_ts(
-        bids: Vec<(&str, &str)>,
-        asks: Vec<(&str, &str)>,
-        ts: i64,
-    ) -> BookUpdate {
+    fn make_update_ts(bids: Vec<(&str, &str)>, asks: Vec<(&str, &str)>, ts: i64) -> BookUpdate {
         BookUpdate::builder()
             .asset_id(U256::ZERO)
             .market(B256::ZERO)
@@ -450,5 +571,47 @@ mod tests {
     fn hash_returns_none_for_missing() {
         let store = BookStore::new();
         assert!(store.hash("nonexistent").is_none());
+    }
+
+    #[test]
+    fn apply_snapshot_populates_book() {
+        let store = BookStore::new();
+        let snapshot = make_snapshot(
+            U256::from(7),
+            vec![("0.48", "100")],
+            vec![("0.52", "100")],
+            2_000,
+            Some("rest-hash"),
+        );
+
+        assert!(store.apply_snapshot(&snapshot));
+
+        let book = store.get("7").unwrap();
+        assert_eq!(book.bids.best().unwrap().price, dec!(0.48));
+        assert_eq!(book.asks.best().unwrap().price, dec!(0.52));
+        assert_eq!(book.hash, Some("rest-hash".into()));
+        assert_eq!(book.timestamp_ms, 2_000);
+    }
+
+    #[test]
+    fn older_snapshot_is_rejected() {
+        let store = BookStore::new();
+        assert!(store.apply(
+            "7",
+            &make_update_ts(vec![("0.49", "100")], vec![("0.51", "100")], 3_000),
+        ));
+
+        let snapshot = make_snapshot(
+            U256::from(7),
+            vec![("0.48", "100")],
+            vec![("0.52", "100")],
+            2_000,
+            Some("rest-hash"),
+        );
+
+        assert!(!store.apply_snapshot(&snapshot));
+        let book = store.get("7").unwrap();
+        assert_eq!(book.bids.best().unwrap().price, dec!(0.49));
+        assert_eq!(book.timestamp_ms, 3_000);
     }
 }

@@ -105,7 +105,8 @@ impl DecayTracker {
         let active_ids: std::collections::HashSet<&str> =
             markets.iter().map(|m| m.condition_id.as_str()).collect();
         let before = self.positions.len();
-        self.positions.retain(|cid, _| active_ids.contains(cid.as_str()));
+        self.positions
+            .retain(|cid, _| active_ids.contains(cid.as_str()));
         let removed = before - self.positions.len();
         if removed > 0 {
             info!(removed, "decay: cleaned up resolved positions");
@@ -133,21 +134,81 @@ pub struct DecayCandidate {
     pub available_size: Decimal,
     /// Whether this is a sports market (uses shorter window and smaller max bet).
     pub is_sports: bool,
+    /// Edge-per-hour score (higher = better opportunity).
+    pub score: f64,
+}
+
+/// Score a market opportunity for high-frequency, low-profit trading.
+///
+/// Scoring formula: edge * turnover_rate * bonuses
+/// - edge: 1 - price (what you pay for certainty)
+/// - turnover_rate: 1 / (abs_hours + 0.1) - faster resolution = better
+/// - sports_in_progress_bonus: 2x for games that have started
+fn score_opportunity(
+    price: Decimal,
+    secs_to_resolution: i64,
+    is_sports: bool,
+    is_game_in_progress: bool,
+) -> f64 {
+    let price_f: f64 = price.try_into().unwrap_or(0.95);
+
+    // Edge: what you pay for near-certainty
+    let edge = 1.0 - price_f;
+
+    // Use absolute time for turnover calculation
+    // For games in progress, this is how long until resolution (estimated)
+    // For pre-game, this is time until game starts
+    let abs_hours = (secs_to_resolution.abs() as f64) / 3600.0;
+
+    // Turnover rate: faster resolution = more capital efficient
+    // Add small constant to avoid division by zero
+    let turnover_rate = 1.0 / (abs_hours + 0.1);
+
+    // Base score
+    let mut score = edge * turnover_rate;
+
+    // Sports in progress bonus: games that have started are much more predictable
+    // Pre-game odds move a lot; in-game odds converge to outcome
+    if is_sports && is_game_in_progress {
+        score *= 2.0;
+    }
+
+    // Price certainty bonus: higher price = more certain outcome
+    if price_f >= 0.95 {
+        score *= 1.2;
+    } else if price_f >= 0.92 {
+        score *= 1.1;
+    }
+
+    score
 }
 
 /// Check if a market is a sports market based on tags.
 fn is_sports_market(market: &TradableMarket) -> bool {
     market.tags.iter().any(|t| {
         let lower = t.to_lowercase();
-        lower.contains("sports") || lower.contains("football") || lower.contains("basketball")
-            || lower.contains("baseball") || lower.contains("hockey") || lower.contains("soccer")
-            || lower.contains("tennis") || lower.contains("golf") || lower.contains("boxing")
-            || lower.contains("mma") || lower.contains("nfl") || lower.contains("nba")
-            || lower.contains("mlb") || lower.contains("nhl") || lower.contains("ncaa")
+        lower.contains("sports")
+            || lower.contains("football")
+            || lower.contains("basketball")
+            || lower.contains("baseball")
+            || lower.contains("hockey")
+            || lower.contains("soccer")
+            || lower.contains("tennis")
+            || lower.contains("golf")
+            || lower.contains("boxing")
+            || lower.contains("mma")
+            || lower.contains("nfl")
+            || lower.contains("nba")
+            || lower.contains("mlb")
+            || lower.contains("nhl")
+            || lower.contains("ncaa")
     })
 }
 
-/// Scan tradable markets for decay candidates.
+/// Scan tradable markets for decay candidates using edge-per-hour scoring.
+///
+/// For sports markets, allows games that are in progress (end_date passed)
+/// up to a maximum game duration (typically 3-4 hours).
 pub fn scan_candidates(
     markets: &[TradableMarket],
     books: &BookStore,
@@ -158,10 +219,12 @@ pub fn scan_candidates(
         return vec![];
     }
 
-    let default_min_price = Decimal::try_from(config.decay_min_price).unwrap_or(dec!(0.80));
+    let default_min_price = Decimal::try_from(config.decay_min_price).unwrap_or(dec!(0.85));
     let sports_min_price = Decimal::try_from(config.decay_sports_min_price).unwrap_or(dec!(0.90));
     let default_window_secs = (config.decay_window_hours * 3600.0) as i64;
     let sports_window_secs = (config.decay_sports_window_hours * 3600.0) as i64;
+    // Max game duration for in-progress sports (3.5 hours = 12600 seconds)
+    const MAX_GAME_DURATION_SECS: i64 = 12600;
 
     let mut candidates = Vec::new();
     let mut skip_non_binary = 0u32;
@@ -171,6 +234,13 @@ pub fn scan_candidates(
     let mut skip_low_price = 0u32;
     let mut skip_no_book = 0u32;
     let mut skip_no_ask = 0u32;
+    // Sports-specific diagnostics
+    let mut sports_total = 0u32;
+    let mut sports_in_progress = 0u32;
+    let mut sports_pre_game = 0u32;
+    let mut sports_skip_window = 0u32;
+    let mut sports_skip_price = 0u32;
+    let mut sports_candidates = 0u32;
 
     for market in markets {
         // Binary markets only (exactly 2 outcomes)
@@ -179,30 +249,55 @@ pub fn scan_candidates(
             continue;
         }
 
-        // Must have an end date within the window
+        // Must have an end date
         let end_date = match market.end_date {
             Some(d) => d,
-            None => { skip_no_end_date += 1; continue; }
+            None => {
+                skip_no_end_date += 1;
+                continue;
+            }
         };
         let secs_remaining = (end_date - now).num_seconds();
 
-        // Use sports-specific window for sports markets
+        // Determine if sports market
         let is_sports = is_sports_market(market);
-        let window_secs = if is_sports {
-            sports_window_secs
+        if is_sports {
+            sports_total += 1;
+        }
+
+        // Window check - different logic for sports vs normal
+        let is_game_in_progress =
+            is_sports && secs_remaining < 0 && secs_remaining > -MAX_GAME_DURATION_SECS;
+        let is_within_window = if is_sports {
+            if secs_remaining > 0 {
+                // Pre-game: must be within sports window
+                sports_pre_game += 1;
+                secs_remaining <= sports_window_secs
+            } else {
+                // In-progress: game must have started recently
+                sports_in_progress += 1;
+                secs_remaining > -MAX_GAME_DURATION_SECS
+            }
         } else {
-            default_window_secs
+            // Normal markets: must end within window and not have ended yet
+            secs_remaining > 0 && secs_remaining <= default_window_secs
         };
 
-        if secs_remaining <= 0 || secs_remaining > window_secs {
+        if !is_within_window {
             skip_outside_window += 1;
+            if is_sports {
+                sports_skip_window += 1;
+            }
             continue;
         }
 
         // Tag exclusion (case-insensitive)
         let excluded = market.tags.iter().any(|t| {
             let lower = t.to_lowercase();
-            config.decay_excluded_tags.iter().any(|ex| lower.contains(ex))
+            config
+                .decay_excluded_tags
+                .iter()
+                .any(|ex| lower.contains(ex))
         });
         if excluded {
             skip_tag_excluded += 1;
@@ -225,17 +320,29 @@ pub fn scan_candidates(
 
         let token = match best_token {
             Some(t) => t,
-            None => { skip_low_price += 1; continue; }
+            None => {
+                skip_low_price += 1;
+                if is_sports {
+                    sports_skip_price += 1;
+                }
+                continue;
+            }
         };
 
         // Verify there's actually an ask available at a reasonable price
         let book = match books.get(&token.token_id) {
             Some(b) => b,
-            None => { skip_no_book += 1; continue; }
+            None => {
+                skip_no_book += 1;
+                continue;
+            }
         };
         let best_ask = match book.asks.best() {
             Some(a) => a.price,
-            None => { skip_no_ask += 1; continue; }
+            None => {
+                skip_no_ask += 1;
+                continue;
+            }
         };
         if best_ask > Decimal::ONE || best_ask < min_price {
             skip_low_price += 1;
@@ -248,12 +355,32 @@ pub fn scan_candidates(
         let mut sweep_size = Decimal::ZERO;
         let mut worst_price = best_ask;
         for level in &book.asks.levels {
-            if level.price > sweep_ceiling { break; }
+            if level.price > sweep_ceiling {
+                break;
+            }
             sweep_size += level.size;
             worst_price = level.price;
         }
 
+        // For in-progress games, estimate time to resolution
+        // (game already started, so remaining time is less than full game duration)
+        let secs_to_resolution = if is_game_in_progress {
+            // Estimate remaining time: max duration - elapsed time
+            let elapsed = -secs_remaining;
+            (MAX_GAME_DURATION_SECS - elapsed).max(300) // at least 5 min remaining
+        } else {
+            secs_remaining
+        };
+
         let hours_to_end = secs_remaining as f64 / 3600.0;
+
+        // Score the opportunity
+        let score = score_opportunity(
+            worst_price,
+            secs_to_resolution,
+            is_sports,
+            is_game_in_progress,
+        );
 
         candidates.push(DecayCandidate {
             condition_id: market.condition_id.clone(),
@@ -266,11 +393,15 @@ pub fn scan_candidates(
             min_order_size: market.min_order_size,
             available_size: sweep_size,
             is_sports,
+            score,
         });
+        if is_sports {
+            sports_candidates += 1;
+        }
     }
 
     if candidates.is_empty() && !markets.is_empty() {
-        debug!(
+        info!(
             total = markets.len(),
             skip_non_binary,
             skip_no_end_date,
@@ -283,10 +414,22 @@ pub fn scan_candidates(
             sports_min_price = %sports_min_price,
             window_hours = config.decay_window_hours,
             sports_window_hours = config.decay_sports_window_hours,
+            sports_total,
+            sports_in_progress,
+            sports_pre_game,
+            sports_skip_window,
+            sports_skip_price,
             "🔍 decay: no candidates — filter breakdown"
         );
     } else if !candidates.is_empty() {
-        debug!(
+        // Sort by score descending (best opportunity first)
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        info!(
             found = candidates.len(),
             total = markets.len(),
             skip_no_end_date,
@@ -294,16 +437,20 @@ pub fn scan_candidates(
             skip_low_price,
             best_price = %candidates[0].price,
             best_hours = format!("{:.1}", candidates[0].hours_to_end),
+            best_score = format!("{:.3}", candidates[0].score),
             min_price = %default_min_price,
             sports_min_price = %sports_min_price,
             window_hours = config.decay_window_hours,
             sports_window_hours = config.decay_sports_window_hours,
+            sports_total,
+            sports_in_progress,
+            sports_candidates,
+            sports_skip_window,
+            sports_skip_price,
             "🔍 decay: candidates found"
         );
     }
 
-    // Sort by price descending (highest conviction first)
-    candidates.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
     candidates
 }
 
@@ -320,8 +467,8 @@ pub fn evaluate_decay_buy(
     } else {
         Decimal::try_from(config.decay_max_bet_usdc).unwrap_or(dec!(15.0))
     };
-    let nav_cap = Decimal::try_from(config.nav_usdc * config.decay_nav_fraction)
-        .unwrap_or(dec!(100.0));
+    let nav_cap =
+        Decimal::try_from(config.nav_usdc * config.decay_nav_fraction).unwrap_or(dec!(100.0));
 
     // Check total capital deployed
     let deployed = tracker.deployed_capital();
@@ -355,13 +502,14 @@ pub fn evaluate_decay_buy(
     // Calculate size: spend / price, capped by available liquidity
     let desired_size = (usdc_to_spend / candidate.price)
         .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
-    let size = desired_size.min(candidate.available_size)
+    let size = desired_size
+        .min(candidate.available_size)
         .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
 
     // Validate both size and USDC cost are above minimums.
     // Cost truncated to 2dp (CLOB requirement) must also be positive.
-    let cost = (size * candidate.price)
-        .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
+    let cost =
+        (size * candidate.price).round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
     if size < candidate.min_order_size || size <= Decimal::ZERO || cost <= Decimal::ZERO {
         info!(
             condition_id = %candidate.condition_id,
@@ -401,7 +549,7 @@ mod tests {
     use super::*;
     use crate::config::test_config;
     use crate::market::book::BookStore;
-    use crate::market::discovery::{TradableMarket, TokenInfo};
+    use crate::market::discovery::{TokenInfo, TradableMarket};
     use chrono::Duration as ChronoDuration;
 
     fn make_market(
@@ -494,8 +642,8 @@ mod tests {
     fn scan_skips_low_price() {
         let now = Utc::now();
         let end = now + ChronoDuration::hours(12);
-        let market = make_market("c1", Some(end), make_tokens("0.75", "0.25"), vec![], false);
-        let books = make_books_with_ask("tok_yes", dec!(0.75));
+        let market = make_market("c1", Some(end), make_tokens("0.80", "0.20"), vec![], false);
+        let books = make_books_with_ask("tok_yes", dec!(0.80));
         let config = test_config();
 
         let candidates = scan_candidates(&[market], &books, &config, now);
@@ -507,8 +655,11 @@ mod tests {
         let now = Utc::now();
         let end = now + ChronoDuration::hours(12);
         let market = make_market(
-            "c1", Some(end), make_tokens("0.95", "0.05"),
-            vec!["Crypto".to_string()], false,
+            "c1",
+            Some(end),
+            make_tokens("0.95", "0.05"),
+            vec!["Crypto".to_string()],
+            false,
         );
         let books = make_books_with_ask("tok_yes", dec!(0.95));
         let config = test_config();
@@ -545,9 +696,21 @@ mod tests {
         let now = Utc::now();
         let end = now + ChronoDuration::hours(12);
         let tokens = vec![
-            TokenInfo { token_id: "t1".into(), outcome: "A".into(), price: dec!(0.95) },
-            TokenInfo { token_id: "t2".into(), outcome: "B".into(), price: dec!(0.03) },
-            TokenInfo { token_id: "t3".into(), outcome: "C".into(), price: dec!(0.02) },
+            TokenInfo {
+                token_id: "t1".into(),
+                outcome: "A".into(),
+                price: dec!(0.95),
+            },
+            TokenInfo {
+                token_id: "t2".into(),
+                outcome: "B".into(),
+                price: dec!(0.03),
+            },
+            TokenInfo {
+                token_id: "t3".into(),
+                outcome: "C".into(),
+                price: dec!(0.02),
+            },
         ];
         let market = make_market("c1", Some(end), tokens, vec![], false);
         let books = make_books_with_ask("t1", dec!(0.95));
@@ -572,6 +735,7 @@ mod tests {
             min_order_size: dec!(1.0),
             available_size: dec!(100),
             is_sports: false,
+            score: 0.1,
         };
 
         let intent = evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).unwrap();
@@ -598,6 +762,7 @@ mod tests {
             min_order_size: dec!(1.0),
             available_size: dec!(100),
             is_sports: false,
+            score: 0.1,
         };
 
         assert!(evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).is_none());
@@ -612,7 +777,15 @@ mod tests {
 
         let mut tracker = DecayTracker::new();
         // Deploy $50 already
-        tracker.record_fill("c_old", "t_old", "Yes", dec!(52), dec!(0.96), false, dec!(0));
+        tracker.record_fill(
+            "c_old",
+            "t_old",
+            "Yes",
+            dec!(52),
+            dec!(0.96),
+            false,
+            dec!(0),
+        );
 
         let candidate = DecayCandidate {
             condition_id: "c1".to_string(),
@@ -625,6 +798,7 @@ mod tests {
             min_order_size: dec!(1.0),
             available_size: dec!(100),
             is_sports: false,
+            score: 0.1,
         };
 
         assert!(evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).is_none());
@@ -645,6 +819,7 @@ mod tests {
             min_order_size: dec!(1.0),
             available_size: dec!(5), // only 5 shares at best ask
             is_sports: false,
+            score: 0.1,
         };
 
         let intent = evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).unwrap();
@@ -666,6 +841,7 @@ mod tests {
             min_order_size: dec!(15.0),
             available_size: dec!(3), // only 3 shares, min is 15
             is_sports: false,
+            score: 0.1,
         };
 
         assert!(evaluate_decay_buy(&candidate, &config, &tracker, dec!(1000)).is_none());
@@ -679,7 +855,11 @@ mod tests {
 
         // Only c1 is still active
         let markets = vec![make_market(
-            "c1", None, make_tokens("0.95", "0.05"), vec![], false,
+            "c1",
+            None,
+            make_tokens("0.95", "0.05"),
+            vec![],
+            false,
         )];
         tracker.cleanup_resolved(&markets);
         assert_eq!(tracker.position_count(), 1);
@@ -687,28 +867,55 @@ mod tests {
     }
 
     #[test]
-    fn candidates_sorted_by_price_descending() {
+    fn candidates_sorted_by_score_descending_not_price() {
+        // When price and time differ, score determines order (edge * turnover)
+        // Higher edge (lower price) can beat higher certainty (higher price)
         let now = Utc::now();
         let end = now + ChronoDuration::hours(12);
 
-        let m1 = make_market("c1", Some(end), vec![
-            TokenInfo { token_id: "t1".into(), outcome: "Yes".into(), price: dec!(0.93) },
-            TokenInfo { token_id: "t1n".into(), outcome: "No".into(), price: dec!(0.07) },
-        ], vec![], false);
-        let m2 = make_market("c2", Some(end), vec![
-            TokenInfo { token_id: "t2".into(), outcome: "Yes".into(), price: dec!(0.97) },
-            TokenInfo { token_id: "t2n".into(), outcome: "No".into(), price: dec!(0.03) },
-        ], vec![], false);
+        let m1 = make_market(
+            "c1",
+            Some(end),
+            vec![
+                TokenInfo {
+                    token_id: "t1".into(),
+                    outcome: "Yes".into(),
+                    price: dec!(0.93),
+                },
+                TokenInfo {
+                    token_id: "t1n".into(),
+                    outcome: "No".into(),
+                    price: dec!(0.07),
+                },
+            ],
+            vec![],
+            false,
+        );
+        let m2 = make_market(
+            "c2",
+            Some(end),
+            vec![
+                TokenInfo {
+                    token_id: "t2".into(),
+                    outcome: "Yes".into(),
+                    price: dec!(0.97),
+                },
+                TokenInfo {
+                    token_id: "t2n".into(),
+                    outcome: "No".into(),
+                    price: dec!(0.03),
+                },
+            ],
+            vec![],
+            false,
+        );
 
         let books = BookStore::new();
         {
             use polymarket_client_sdk::clob::ws::types::response::{BookUpdate, OrderBookLevel};
             use polymarket_client_sdk::types::{B256, U256};
             for (tid, ask) in [("t1", dec!(0.93)), ("t2", dec!(0.97))] {
-                let level = OrderBookLevel::builder()
-                    .price(ask)
-                    .size(dec!(100))
-                    .build();
+                let level = OrderBookLevel::builder().price(ask).size(dec!(100)).build();
                 let update = BookUpdate::builder()
                     .asset_id(U256::ZERO)
                     .market(B256::ZERO)
@@ -724,8 +931,12 @@ mod tests {
         let config = test_config();
         let candidates = scan_candidates(&[m1, m2], &books, &config, now);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].price, dec!(0.97)); // highest first
-        assert_eq!(candidates[1].price, dec!(0.93));
+        // 0.93 has larger edge (0.07 vs 0.03) with same turnover
+        // Even with price bonus for 0.97, the edge difference dominates
+        assert!(
+            candidates[0].score >= candidates[1].score,
+            "should be sorted by score"
+        );
     }
 
     #[test]
@@ -734,14 +945,21 @@ mod tests {
         // 3 minutes = within 5 min sports window
         let end = now + ChronoDuration::minutes(3);
         let market = make_market(
-            "c1", Some(end), make_tokens("0.95", "0.05"),
-            vec!["Sports".to_string()], false,
+            "c1",
+            Some(end),
+            make_tokens("0.95", "0.05"),
+            vec!["Sports".to_string()],
+            false,
         );
         let books = make_books_with_ask("tok_yes", dec!(0.95));
         let config = test_config();
 
         let candidates = scan_candidates(&[market], &books, &config, now);
-        assert_eq!(candidates.len(), 1, "sports market within 5min window should be found");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "sports market within 5min window should be found"
+        );
     }
 
     #[test]
@@ -750,14 +968,20 @@ mod tests {
         // 10 minutes = outside 5 min sports window, but within 24h normal window
         let end = now + ChronoDuration::minutes(10);
         let market = make_market(
-            "c1", Some(end), make_tokens("0.95", "0.05"),
-            vec!["Sports".to_string()], false,
+            "c1",
+            Some(end),
+            make_tokens("0.95", "0.05"),
+            vec!["Sports".to_string()],
+            false,
         );
         let books = make_books_with_ask("tok_yes", dec!(0.95));
         let config = test_config();
 
         let candidates = scan_candidates(&[market], &books, &config, now);
-        assert!(candidates.is_empty(), "sports market outside 5min window should be skipped");
+        assert!(
+            candidates.is_empty(),
+            "sports market outside 5min window should be skipped"
+        );
     }
 
     #[test]
@@ -770,7 +994,11 @@ mod tests {
         let config = test_config();
 
         let candidates = scan_candidates(&[market], &books, &config, now);
-        assert_eq!(candidates.len(), 1, "non-sports market within 24h window should be found");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "non-sports market within 24h window should be found"
+        );
     }
 
     #[test]
@@ -783,7 +1011,10 @@ mod tests {
         let config = test_config();
 
         let candidates = scan_candidates(&[market], &books, &config, now);
-        assert!(candidates.is_empty(), "non-sports market outside 24h window should be skipped");
+        assert!(
+            candidates.is_empty(),
+            "non-sports market outside 24h window should be skipped"
+        );
     }
 
     #[test]
@@ -823,7 +1054,11 @@ mod tests {
                 tags: tags.iter().map(|s| s.to_string()).collect(),
                 end_date: None,
             };
-            assert!(is_sports_market(&market), "should detect {:?} as sports", tags);
+            assert!(
+                is_sports_market(&market),
+                "should detect {:?} as sports",
+                tags
+            );
         }
     }
 
@@ -844,12 +1079,19 @@ mod tests {
             min_order_size: dec!(1.0),
             available_size: dec!(100),
             is_sports: true,
+            score: 0.5,
         };
 
         let intent = evaluate_decay_buy(&sports_candidate, &config, &tracker, dec!(1000)).unwrap();
         // $5 / $0.95 = 5.26 shares (rounded down)
-        assert!(intent.size <= dec!(5.27), "sports bet should be capped at $5");
-        assert!(intent.size >= dec!(5.0), "sports bet should be at least $5 worth");
+        assert!(
+            intent.size <= dec!(5.27),
+            "sports bet should be capped at $5"
+        );
+        assert!(
+            intent.size >= dec!(5.0),
+            "sports bet should be at least $5 worth"
+        );
 
         // Non-sports candidate should use decay_max_bet_usdc ($15)
         let normal_candidate = DecayCandidate {
@@ -863,12 +1105,19 @@ mod tests {
             min_order_size: dec!(1.0),
             available_size: dec!(100),
             is_sports: false,
+            score: 0.1,
         };
 
         let intent2 = evaluate_decay_buy(&normal_candidate, &config, &tracker, dec!(1000)).unwrap();
         // $15 / $0.95 = 15.78 shares (rounded down)
-        assert!(intent2.size <= dec!(15.79), "normal bet should be capped at $15");
-        assert!(intent2.size >= dec!(15.0), "normal bet should be at least $15 worth");
+        assert!(
+            intent2.size <= dec!(15.79),
+            "normal bet should be capped at $15"
+        );
+        assert!(
+            intent2.size >= dec!(15.0),
+            "normal bet should be at least $15 worth"
+        );
     }
 
     #[test]
@@ -878,14 +1127,20 @@ mod tests {
 
         // Price at 0.85 - should qualify for normal (min 0.80) but not sports (min 0.90)
         let market = make_market(
-            "c1", Some(end), make_tokens("0.85", "0.15"),
-            vec!["Sports".to_string()], false,
+            "c1",
+            Some(end),
+            make_tokens("0.85", "0.15"),
+            vec!["Sports".to_string()],
+            false,
         );
         let books = make_books_with_ask("tok_yes", dec!(0.85));
         let config = test_config();
 
         let candidates = scan_candidates(&[market], &books, &config, now);
-        assert!(candidates.is_empty(), "sports market at 0.85 should be skipped (min is 0.90)");
+        assert!(
+            candidates.is_empty(),
+            "sports market at 0.85 should be skipped (min is 0.90)"
+        );
     }
 
     #[test]
@@ -895,13 +1150,248 @@ mod tests {
 
         // Price at 0.90 - should qualify for sports (min 0.90)
         let market = make_market(
-            "c1", Some(end), make_tokens("0.90", "0.10"),
-            vec!["Sports".to_string()], false,
+            "c1",
+            Some(end),
+            make_tokens("0.90", "0.10"),
+            vec!["Sports".to_string()],
+            false,
         );
         let books = make_books_with_ask("tok_yes", dec!(0.90));
         let config = test_config();
 
         let candidates = scan_candidates(&[market], &books, &config, now);
         assert_eq!(candidates.len(), 1, "sports market at 0.90 should qualify");
+    }
+
+    #[test]
+    fn scan_sports_in_progress_game_found() {
+        let now = Utc::now();
+        // Game started 1 hour ago (negative secs_remaining)
+        let end = now - ChronoDuration::hours(1);
+
+        let market = make_market(
+            "c1",
+            Some(end),
+            make_tokens("0.95", "0.05"),
+            vec!["Sports".to_string()],
+            false,
+        );
+        let books = make_books_with_ask("tok_yes", dec!(0.95));
+        let config = test_config();
+
+        let candidates = scan_candidates(&[market], &books, &config, now);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "sports game in progress should be found"
+        );
+        assert!(candidates[0].score > 0.0, "candidate should have a score");
+    }
+
+    #[test]
+    fn scan_sports_in_progress_2x_bonus_applied() {
+        // Verify that in-progress games get the 2x bonus
+        // We test this by comparing same time-to-resolution with/without in-progress flag
+        let now = Utc::now();
+
+        // Game in progress: started 2.5 hours ago, ~1 hour remaining
+        let in_progress_end = now - ChronoDuration::seconds(9000); // 2.5 hours ago
+        let m_in_progress = make_market(
+            "c1",
+            Some(in_progress_end),
+            make_tokens("0.95", "0.05"),
+            vec!["Sports".to_string()],
+            false,
+        );
+
+        let books = BookStore::new();
+        {
+            use polymarket_client_sdk::clob::ws::types::response::{BookUpdate, OrderBookLevel};
+            use polymarket_client_sdk::types::{B256, U256};
+            let level = OrderBookLevel::builder()
+                .price(dec!(0.95))
+                .size(dec!(100))
+                .build();
+            let update = BookUpdate::builder()
+                .asset_id(U256::ZERO)
+                .market(B256::ZERO)
+                .timestamp(1000)
+                .bids(vec![])
+                .asks(vec![level])
+                .hash("test".into())
+                .build();
+            books.apply("tok_yes", &update);
+        }
+
+        let config = test_config();
+
+        let candidates = scan_candidates(&[m_in_progress], &books, &config, now);
+        assert_eq!(candidates.len(), 1);
+
+        // Manually calculate expected score to verify 2x bonus is applied
+        // price = 0.95, edge = 0.05, bonus = 1.2 (>= 0.95)
+        // secs_to_resolution = 12600 - 9000 = 3600 (1 hour)
+        // abs_hours = 1.0, turnover = 1 / 1.1 = 0.91
+        // base_score = 0.05 * 0.91 * 1.2 = 0.0545
+        // with 2x bonus = 0.109
+        let score = candidates[0].score;
+        assert!(
+            score > 0.1,
+            "in-progress score {} should include 2x bonus",
+            score
+        );
+        assert!(
+            score < 0.15,
+            "in-progress score {} should be reasonable",
+            score
+        );
+    }
+
+    #[test]
+    fn scan_sports_game_too_old_skipped() {
+        let now = Utc::now();
+        // Game started 5 hours ago (beyond MAX_GAME_DURATION_SECS)
+        let end = now - ChronoDuration::hours(5);
+
+        let market = make_market(
+            "c1",
+            Some(end),
+            make_tokens("0.95", "0.05"),
+            vec!["Sports".to_string()],
+            false,
+        );
+        let books = make_books_with_ask("tok_yes", dec!(0.95));
+        let config = test_config();
+
+        let candidates = scan_candidates(&[market], &books, &config, now);
+        assert!(
+            candidates.is_empty(),
+            "sports game too old should be skipped"
+        );
+    }
+
+    #[test]
+    fn score_opportunity_favors_shorter_resolution() {
+        let now = Utc::now();
+
+        // Two markets with same price but different resolution times
+        let end_soon = now + ChronoDuration::hours(1);
+        let end_later = now + ChronoDuration::hours(12);
+
+        let m1 = make_market(
+            "c1",
+            Some(end_soon),
+            make_tokens("0.95", "0.05"),
+            vec![],
+            false,
+        );
+        let m2 = make_market(
+            "c2",
+            Some(end_later),
+            make_tokens("0.95", "0.05"),
+            vec![],
+            false,
+        );
+
+        let books = BookStore::new();
+        {
+            use polymarket_client_sdk::clob::ws::types::response::{BookUpdate, OrderBookLevel};
+            use polymarket_client_sdk::types::{B256, U256};
+            for (tid, ask) in [("tok_yes", dec!(0.95))] {
+                let level = OrderBookLevel::builder().price(ask).size(dec!(100)).build();
+                let update = BookUpdate::builder()
+                    .asset_id(U256::ZERO)
+                    .market(B256::ZERO)
+                    .timestamp(1000)
+                    .bids(vec![])
+                    .asks(vec![level])
+                    .hash("test".into())
+                    .build();
+                books.apply(tid, &update);
+            }
+        }
+
+        let config = test_config();
+        let candidates = scan_candidates(&[m1, m2], &books, &config, now);
+
+        assert_eq!(candidates.len(), 2);
+        // Shorter resolution should be ranked first (higher score)
+        assert!(
+            candidates[0].score > candidates[1].score,
+            "shorter resolution should have higher score"
+        );
+    }
+
+    #[test]
+    fn candidates_sorted_by_score_descending() {
+        let now = Utc::now();
+        // Different prices, different times - scoring determines order
+        let end1 = now + ChronoDuration::hours(1); // 0.93 @ 1hr
+        let end2 = now + ChronoDuration::hours(12); // 0.97 @ 12hr
+
+        let m1 = make_market(
+            "c1",
+            Some(end1),
+            vec![
+                TokenInfo {
+                    token_id: "t1".into(),
+                    outcome: "Yes".into(),
+                    price: dec!(0.93),
+                },
+                TokenInfo {
+                    token_id: "t1n".into(),
+                    outcome: "No".into(),
+                    price: dec!(0.07),
+                },
+            ],
+            vec![],
+            false,
+        );
+        let m2 = make_market(
+            "c2",
+            Some(end2),
+            vec![
+                TokenInfo {
+                    token_id: "t2".into(),
+                    outcome: "Yes".into(),
+                    price: dec!(0.97),
+                },
+                TokenInfo {
+                    token_id: "t2n".into(),
+                    outcome: "No".into(),
+                    price: dec!(0.03),
+                },
+            ],
+            vec![],
+            false,
+        );
+
+        let books = BookStore::new();
+        {
+            use polymarket_client_sdk::clob::ws::types::response::{BookUpdate, OrderBookLevel};
+            use polymarket_client_sdk::types::{B256, U256};
+            for (tid, ask) in [("t1", dec!(0.93)), ("t2", dec!(0.97))] {
+                let level = OrderBookLevel::builder().price(ask).size(dec!(100)).build();
+                let update = BookUpdate::builder()
+                    .asset_id(U256::ZERO)
+                    .market(B256::ZERO)
+                    .timestamp(1000)
+                    .bids(vec![])
+                    .asks(vec![level])
+                    .hash("test".into())
+                    .build();
+                books.apply(tid, &update);
+            }
+        }
+
+        let config = test_config();
+        let candidates = scan_candidates(&[m1, m2], &books, &config, now);
+
+        assert_eq!(candidates.len(), 2);
+        // Should be sorted by score, not price
+        assert!(
+            candidates[0].score >= candidates[1].score,
+            "candidates should be sorted by score descending"
+        );
     }
 }

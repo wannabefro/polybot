@@ -40,11 +40,12 @@ pub async fn refresh_earnings(client: &AuthClient, tracker: &RewardTracker) {
     use polymarket_client_sdk::clob::types::request::UserRewardsEarningRequest;
 
     let today = Utc::now().date_naive();
-    let request = UserRewardsEarningRequest::builder()
-        .date(today)
-        .build();
+    let request = UserRewardsEarningRequest::builder().date(today).build();
 
-    match client.user_earnings_and_markets_config(&request, None).await {
+    match client
+        .user_earnings_and_markets_config(&request, None)
+        .await
+    {
         Ok(responses) => {
             let mut total = Decimal::ZERO;
             let mut count = 0u32;

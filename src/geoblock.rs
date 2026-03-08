@@ -17,7 +17,10 @@ async fn check() -> Result<bool> {
     match client.get(GEOBLOCK_URL).send().await {
         Ok(resp) => {
             let body: serde_json::Value = resp.json().await?;
-            let blocked = body.get("blocked").and_then(|v| v.as_bool()).unwrap_or(true);
+            let blocked = body
+                .get("blocked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             return Ok(blocked);
         }
         Err(_) => {
@@ -30,7 +33,10 @@ async fn check() -> Result<bool> {
                 bail!("geoblock: curl fallback also failed");
             }
             let body: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-            let blocked = body.get("blocked").and_then(|v| v.as_bool()).unwrap_or(true);
+            let blocked = body
+                .get("blocked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             Ok(blocked)
         }
     }
@@ -61,7 +67,10 @@ pub async fn check_or_abort() -> Result<()> {
 /// channel if we become blocked (caller should cancel-all and halt).
 pub fn spawn_monitor(
     config: &Config,
-) -> (tokio::task::JoinHandle<()>, tokio::sync::watch::Receiver<bool>) {
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::watch::Receiver<bool>,
+) {
     let interval = config.geoblock_poll_interval;
     let (tx, rx) = tokio::sync::watch::channel(false);
 

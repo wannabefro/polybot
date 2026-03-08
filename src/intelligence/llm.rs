@@ -69,10 +69,7 @@ pub fn validate_response(resp: &LlmResponse) -> Result<RiskSignal> {
 ///
 /// Periodically calls the LLM endpoint, validates the response, and
 /// publishes RiskSignals through the signal bridge.
-pub fn spawn(
-    llm_config: LlmConfig,
-    signal_tx: SignalSender,
-) -> tokio::task::JoinHandle<()> {
+pub fn spawn(llm_config: LlmConfig, signal_tx: SignalSender) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = time::interval(llm_config.poll_interval);
 
@@ -87,12 +84,7 @@ pub fn spawn(
                 }
             };
 
-            match tokio::time::timeout(
-                llm_config.timeout,
-                call_llm(&endpoint),
-            )
-            .await
-            {
+            match tokio::time::timeout(llm_config.timeout, call_llm(&endpoint)).await {
                 Ok(Ok(resp)) => match validate_response(&resp) {
                     Ok(signal) => {
                         info!(

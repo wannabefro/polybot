@@ -166,7 +166,8 @@ impl Metrics {
 
     #[allow(dead_code)]
     pub fn inc_unwind_hardstop_failures(&self) {
-        self.unwind_hardstop_failures.fetch_add(1, Ordering::Relaxed);
+        self.unwind_hardstop_failures
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     #[allow(dead_code)]

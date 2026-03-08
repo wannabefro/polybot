@@ -135,9 +135,7 @@ impl MeanRevertState {
 
     /// Check if tracker is ready for signals.
     pub fn is_ready(&self, token_id: &str) -> bool {
-        self.trackers
-            .get(token_id)
-            .map_or(false, |t| t.is_ready())
+        self.trackers.get(token_id).map_or(false, |t| t.is_ready())
     }
 
     /// Add an open position.
@@ -150,10 +148,10 @@ impl MeanRevertState {
         let mut exits = Vec::new();
         for pos in &self.positions {
             let should_close = pos.time_stopped(TIME_STOP_HOURS)
-                || books.get(&pos.token_id).and_then(|b| b.mid_price()).map_or(
-                    false,
-                    |mid| pos.price_stopped(mid, PRICE_STOP_FRACTION),
-                );
+                || books
+                    .get(&pos.token_id)
+                    .and_then(|b| b.mid_price())
+                    .map_or(false, |mid| pos.price_stopped(mid, PRICE_STOP_FRACTION));
 
             if should_close {
                 let exit_side = match pos.side {
@@ -259,10 +257,10 @@ pub fn evaluate_entry(
     };
 
     // Size: capped by strategy budget and one-sided inventory budget.
-    let strategy_notional = Decimal::try_from(config.nav_limit(config.mean_revert_max_nav_frac)).ok()?;
-    let inventory_notional = Decimal::try_from(
-        config.nav_limit(config.effective_max_one_sided_inventory())
-    ).ok()?;
+    let strategy_notional =
+        Decimal::try_from(config.nav_limit(config.mean_revert_max_nav_frac)).ok()?;
+    let inventory_notional =
+        Decimal::try_from(config.nav_limit(config.effective_max_one_sided_inventory())).ok()?;
     let max_notional = strategy_notional.min(inventory_notional);
     if max_notional <= Decimal::ZERO {
         return None;
@@ -317,7 +315,7 @@ mod tests {
     use super::*;
     use crate::config::tests::test_config;
     use crate::market::book::BookStore;
-    use crate::market::discovery::{TradableMarket, TokenInfo};
+    use crate::market::discovery::{TokenInfo, TradableMarket};
     use crate::risk::guardrails::RiskEngine;
     use polymarket_client_sdk::clob::ws::types::response::{BookUpdate, OrderBookLevel};
     use polymarket_client_sdk::types::{B256, U256};

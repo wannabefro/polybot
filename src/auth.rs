@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use polymarket_client_sdk::auth::{state::Authenticated, LocalSigner, Normal, Signer as _};
-use polymarket_client_sdk::clob::{Client, Config as SdkConfig};
 use polymarket_client_sdk::clob::types::SignatureType;
+use polymarket_client_sdk::clob::{Client, Config as SdkConfig};
 use tracing::info;
 
 use crate::config::Config;
@@ -29,8 +29,7 @@ pub async fn init(config: &Config) -> Result<AuthContext> {
     info!("auth: creating L1 signer");
 
     let chain_id = config.chain_id;
-    let signer = LocalSigner::from_str(&config.private_key)?
-        .with_chain_id(Some(chain_id));
+    let signer = LocalSigner::from_str(&config.private_key)?.with_chain_id(Some(chain_id));
 
     info!(address = %signer.address(), "auth: L1 signer ready");
 

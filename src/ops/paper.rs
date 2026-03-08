@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rand::Rng;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use tracing::{debug, info};
 
 use crate::market::book::BookStore;
@@ -58,12 +58,14 @@ impl PaperEngine {
         // Check if the order would be immediately filled (crosses the book)
         let would_fill = if let Some(book) = books.get(&intent.token_id) {
             match intent.side {
-                polymarket_client_sdk::clob::types::Side::Buy => {
-                    book.asks.best().map_or(false, |ask| intent.price >= ask.price)
-                }
-                polymarket_client_sdk::clob::types::Side::Sell => {
-                    book.bids.best().map_or(false, |bid| intent.price <= bid.price)
-                }
+                polymarket_client_sdk::clob::types::Side::Buy => book
+                    .asks
+                    .best()
+                    .map_or(false, |ask| intent.price >= ask.price),
+                polymarket_client_sdk::clob::types::Side::Sell => book
+                    .bids
+                    .best()
+                    .map_or(false, |bid| intent.price <= bid.price),
                 _ => false,
             }
         } else {
@@ -97,7 +99,9 @@ impl PaperEngine {
                 post_only = intent.post_only,
                 "paper: order resting"
             );
-            self.open_orders.write().insert(order_id.clone(), intent.clone());
+            self.open_orders
+                .write()
+                .insert(order_id.clone(), intent.clone());
             (order_id, None)
         }
     }
@@ -203,10 +207,14 @@ fn resting_fill_probability(
     let best_ask = book.asks.best()?;
 
     // Deterministic fill when market moves through our resting price.
-    if matches!(intent.side, polymarket_client_sdk::clob::types::Side::Buy) && intent.price >= best_ask.price {
+    if matches!(intent.side, polymarket_client_sdk::clob::types::Side::Buy)
+        && intent.price >= best_ask.price
+    {
         return Some(1.0);
     }
-    if matches!(intent.side, polymarket_client_sdk::clob::types::Side::Sell) && intent.price <= best_bid.price {
+    if matches!(intent.side, polymarket_client_sdk::clob::types::Side::Sell)
+        && intent.price <= best_bid.price
+    {
         return Some(1.0);
     }
 

@@ -1,9 +1,9 @@
+pub mod auth;
 pub mod config;
 pub mod geoblock;
-pub mod auth;
+pub mod intelligence;
 pub mod market;
+pub mod ops;
 pub mod order;
 pub mod risk;
 pub mod strategy;
-pub mod intelligence;
-pub mod ops;

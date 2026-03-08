@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use polymarket_client_sdk::clob::types::AssetType;
-use polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest;
 use polymarket_client_sdk::auth::{state::Authenticated, Normal};
+use polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest;
+use polymarket_client_sdk::clob::types::AssetType;
 use polymarket_client_sdk::clob::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;

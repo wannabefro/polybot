@@ -1,4 +1,3 @@
-
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -130,9 +129,9 @@ fn generate_binary_quotes(
     let rewards_min = market.rewards_min_size.unwrap_or(Decimal::ZERO);
     let mm_min = Decimal::from_f64_retain(config.mm_min_size).unwrap_or(Decimal::ZERO);
     let mut size = market.min_order_size.max(rewards_min).max(mm_min);
-    let inventory_cap_notional = Decimal::from_f64_retain(
-        config.nav_limit(config.effective_max_one_sided_inventory())
-    ).unwrap_or(Decimal::ZERO);
+    let inventory_cap_notional =
+        Decimal::from_f64_retain(config.nav_limit(config.effective_max_one_sided_inventory()))
+            .unwrap_or(Decimal::ZERO);
     if !mid.is_zero() && inventory_cap_notional > Decimal::ZERO {
         size = size.min(inventory_cap_notional / mid);
     }
@@ -212,9 +211,9 @@ fn generate_single_buy(
     let rewards_min = market.rewards_min_size.unwrap_or(Decimal::ZERO);
     let mm_min = Decimal::from_f64_retain(config.mm_min_size).unwrap_or(Decimal::ZERO);
     let mut size = market.min_order_size.max(rewards_min).max(mm_min);
-    let inventory_cap_notional = Decimal::from_f64_retain(
-        config.nav_limit(config.effective_max_one_sided_inventory())
-    ).unwrap_or(Decimal::ZERO);
+    let inventory_cap_notional =
+        Decimal::from_f64_retain(config.nav_limit(config.effective_max_one_sided_inventory()))
+            .unwrap_or(Decimal::ZERO);
     if !mid.is_zero() && inventory_cap_notional > Decimal::ZERO {
         size = size.min(inventory_cap_notional / mid);
     }

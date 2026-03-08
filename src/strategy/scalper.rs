@@ -42,10 +42,7 @@ impl ScalperState {
     /// Record a mid price sample for a token.
     pub fn record_mid(&mut self, token_id: &str, mid: f64) {
         let now = Instant::now();
-        let history = self
-            .mids
-            .entry(token_id.to_string())
-            .or_default();
+        let history = self.mids.entry(token_id.to_string()).or_default();
         history.push_back((now, mid));
 
         let keep_after = now
@@ -146,9 +143,7 @@ pub fn evaluate_niche_market(
 
         let bid_touch_notional = best_bid.price * best_bid.size;
         let ask_touch_notional = best_ask.price * best_ask.size;
-        let touch_notional = bid_touch_notional
-            .min(ask_touch_notional)
-            .to_f64()?;
+        let touch_notional = bid_touch_notional.min(ask_touch_notional).to_f64()?;
         min_touch_notional = min_touch_notional.min(touch_notional);
 
         let vol_ticks = state
@@ -164,9 +159,8 @@ pub fn evaluate_niche_market(
         return None;
     }
 
-    let score = 1.5 * min_spread_ticks
-        + 0.8 * (1.0 + min_touch_notional).ln()
-        - 1.2 * max_vol_ticks;
+    let score =
+        1.5 * min_spread_ticks + 0.8 * (1.0 + min_touch_notional).ln() - 1.2 * max_vol_ticks;
 
     Some(ScalperMarketScore {
         condition_id: market.condition_id.clone(),
@@ -227,7 +221,14 @@ mod tests {
         }
     }
 
-    fn seed_book(store: &BookStore, token_id: &str, bid: &str, bid_size: &str, ask: &str, ask_size: &str) {
+    fn seed_book(
+        store: &BookStore,
+        token_id: &str,
+        bid: &str,
+        bid_size: &str,
+        ask: &str,
+        ask_size: &str,
+    ) {
         let update = BookUpdate::builder()
             .asset_id(U256::ZERO)
             .market(B256::ZERO)

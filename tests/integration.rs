@@ -5,7 +5,7 @@
 
 use polybot::config::test_config;
 use polybot::market::book::BookStore;
-use polybot::market::discovery::{TradableMarket, TokenInfo};
+use polybot::market::discovery::{TokenInfo, TradableMarket};
 use polybot::ops::metrics::Metrics;
 use polybot::ops::paper::PaperEngine;
 use polybot::order::pipeline::OrderIntent;
@@ -87,7 +87,10 @@ async fn paper_pipeline_rebate_mm_tick() {
 
     // Generate quotes
     let quotes = strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk);
-    assert!(!quotes.is_empty(), "should generate quotes for a valid market");
+    assert!(
+        !quotes.is_empty(),
+        "should generate quotes for a valid market"
+    );
 
     let (bid, ask) = &quotes[0];
     assert!(matches!(bid.side, Side::Buy));
@@ -148,8 +151,8 @@ async fn risk_daily_loss_rejects_orders() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: true,
-    neg_risk: false,
-    fee_rate_bps: Decimal::ZERO,
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
     };
     let verdict = risk.check("cond1", &intent);
     assert!(
@@ -174,8 +177,8 @@ async fn risk_halt_stops_all_orders() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: true,
-    neg_risk: false,
-    fee_rate_bps: Decimal::ZERO,
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
     };
     let verdict = risk.check("cond1", &intent);
     assert!(matches!(verdict, RiskVerdict::Rejected(_)));
@@ -197,15 +200,21 @@ async fn risk_daily_reset_clears_loss() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: true,
-    neg_risk: false,
-    fee_rate_bps: Decimal::ZERO,
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
     };
-    assert!(matches!(risk.check("cond1", &intent), RiskVerdict::Rejected(_)));
+    assert!(matches!(
+        risk.check("cond1", &intent),
+        RiskVerdict::Rejected(_)
+    ));
 
     risk.reset_daily();
 
     // Should approve now
-    assert!(matches!(risk.check("cond1", &intent), RiskVerdict::Approved));
+    assert!(matches!(
+        risk.check("cond1", &intent),
+        RiskVerdict::Approved
+    ));
 }
 
 /// Complement fills on the same condition auto-hedge each other.
@@ -223,9 +232,9 @@ async fn complement_fills_auto_hedge() {
         filled_at: Instant::now(),
         neg_risk: false,
         fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+        tick_size: dec!(0.01),
+        unwind_attempts: 0,
+        hard_stop_failures: 0,
     });
     assert_eq!(tracker.unhedged_count(), 1);
 
@@ -239,11 +248,15 @@ async fn complement_fills_auto_hedge() {
         filled_at: Instant::now(),
         neg_risk: false,
         fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+        tick_size: dec!(0.01),
+        unwind_attempts: 0,
+        hard_stop_failures: 0,
     });
-    assert_eq!(tracker.unhedged_count(), 0, "complement fills should auto-hedge");
+    assert_eq!(
+        tracker.unhedged_count(),
+        0,
+        "complement fills should auto-hedge"
+    );
 }
 
 /// Expired single-sided fills generate SELL unwind orders.
@@ -262,9 +275,9 @@ async fn expired_fill_generates_unwind() {
         filled_at: Instant::now() - Duration::from_secs(1),
         neg_risk: false,
         fee_rate_bps: Decimal::ZERO,
-                tick_size: dec!(0.01),
-                unwind_attempts: 0,
-                hard_stop_failures: 0,
+        tick_size: dec!(0.01),
+        unwind_attempts: 0,
+        hard_stop_failures: 0,
     });
 
     let unwinds = tracker.expired_unwinds(
@@ -274,9 +287,19 @@ async fn expired_fill_generates_unwind() {
         Duration::from_secs(4),
     );
     assert_eq!(unwinds.len(), 1);
-    assert!(matches!(unwinds[0].intent.side, Side::Sell), "unwind should sell tokens");
-    assert_eq!(unwinds[0].intent.price, dec!(0.48), "should sell at best bid");
-    assert!(!unwinds[0].intent.post_only, "unwinds should not be post-only");
+    assert!(
+        matches!(unwinds[0].intent.side, Side::Sell),
+        "unwind should sell tokens"
+    );
+    assert_eq!(
+        unwinds[0].intent.price,
+        dec!(0.48),
+        "should sell at best bid"
+    );
+    assert!(
+        !unwinds[0].intent.post_only,
+        "unwinds should not be post-only"
+    );
 }
 
 /// Mean reversion: full cycle from price recording to exit.
@@ -302,7 +325,10 @@ async fn mean_revert_full_cycle() {
     let intent = strategy::mean_revert::evaluate_entry(&cfg, &market, &books, &risk, &state);
     assert!(intent.is_some(), "should signal entry on deviation");
     let intent = intent.unwrap();
-    assert!(matches!(intent.side, Side::Sell), "should sell when above SMA");
+    assert!(
+        matches!(intent.side, Side::Sell),
+        "should sell when above SMA"
+    );
 
     // Place the order
     router.place(&intent, &books).await.unwrap();
@@ -344,9 +370,7 @@ async fn multi_strategy_coexistence() {
     }
 
     // Reward also generates quotes (same market, different quotes)
-    for (bid, ask) in
-        strategy::reward::evaluate_reward_quote(&cfg, &market, &books, &risk)
-    {
+    for (bid, ask) in strategy::reward::evaluate_reward_quote(&cfg, &market, &books, &risk) {
         router.place(&bid, &books).await.unwrap();
         router.place(&ask, &books).await.unwrap();
         metrics.inc_quotes_sent();
@@ -402,8 +426,8 @@ async fn fill_detection_through_router() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: false,
-    neg_risk: false,
-    fee_rate_bps: Decimal::ZERO,
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
     };
     let result = router.place(&intent, &books).await.unwrap();
     assert!(result.paper_fill.is_some());
@@ -432,10 +456,13 @@ async fn cancel_failure_threshold_halts_engine() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: true,
-    neg_risk: false,
-    fee_rate_bps: Decimal::ZERO,
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
     };
-    assert!(matches!(risk.check("cond1", &intent), RiskVerdict::Rejected(_)));
+    assert!(matches!(
+        risk.check("cond1", &intent),
+        RiskVerdict::Rejected(_)
+    ));
 }
 
 /// Gap #3: One-sided inventory blocks excessive directional exposure.
@@ -446,7 +473,13 @@ async fn one_sided_inventory_blocks_excessive_exposure() {
 
     // max_one_sided_inventory = 0.04 → 4% of 10000 = 400 USDC
     // Record buy 400 shares at 0.50 = 200 notional (at per-market limit of 2%=200)
-    risk.record_fill("cond1", "token_yes", Side::Buy, Decimal::from(400), Decimal::from(200));
+    risk.record_fill(
+        "cond1",
+        "token_yes",
+        Side::Buy,
+        Decimal::from(400),
+        Decimal::from(200),
+    );
 
     // Further buying should be blocked (at per-market limit)
     let intent = OrderIntent {
@@ -456,10 +489,13 @@ async fn one_sided_inventory_blocks_excessive_exposure() {
         size: dec!(10),
         order_type: OrderType::GTC,
         post_only: true,
-    neg_risk: false,
-    fee_rate_bps: Decimal::ZERO,
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
     };
-    assert!(matches!(risk.check("cond1", &intent), RiskVerdict::Rejected(_)));
+    assert!(matches!(
+        risk.check("cond1", &intent),
+        RiskVerdict::Rejected(_)
+    ));
 
     // But selling should be fine (reduces inventory)
     let sell_intent = OrderIntent {
@@ -469,10 +505,13 @@ async fn one_sided_inventory_blocks_excessive_exposure() {
         size: dec!(50),
         order_type: OrderType::GTC,
         post_only: true,
-    neg_risk: false,
-    fee_rate_bps: Decimal::ZERO,
+        neg_risk: false,
+        fee_rate_bps: Decimal::ZERO,
     };
-    assert!(matches!(risk.check("cond1", &sell_intent), RiskVerdict::Approved));
+    assert!(matches!(
+        risk.check("cond1", &sell_intent),
+        RiskVerdict::Approved
+    ));
 }
 
 /// Gap #5: Book timestamp regression is rejected.
@@ -565,7 +604,10 @@ async fn paper_fill_returned_atomically() {
         &books,
     );
     assert!(id.starts_with("paper-"));
-    assert!(fill.is_some(), "crossing order should return fill atomically");
+    assert!(
+        fill.is_some(),
+        "crossing order should return fill atomically"
+    );
     let f = fill.unwrap();
     assert_eq!(f.token_id, "token_yes");
     assert_eq!(f.size, dec!(10));
@@ -600,8 +642,20 @@ async fn inventory_snapshot_for_recon() {
     let cfg = test_config();
     let risk = RiskEngine::new(cfg.clone());
 
-    risk.record_fill("cond1", "token_yes", Side::Buy, Decimal::from(100), Decimal::from(50));
-    risk.record_fill("cond1", "token_no", Side::Sell, Decimal::from(50), Decimal::from(25));
+    risk.record_fill(
+        "cond1",
+        "token_yes",
+        Side::Buy,
+        Decimal::from(100),
+        Decimal::from(50),
+    );
+    risk.record_fill(
+        "cond1",
+        "token_no",
+        Side::Sell,
+        Decimal::from(50),
+        Decimal::from(25),
+    );
 
     let snapshot = risk.inventory_snapshot();
     assert_eq!(snapshot.len(), 2);
@@ -642,20 +696,31 @@ async fn inventory_skew_shifts_quotes() {
     let (bid_n, _ask_n) = &quotes_neutral[0];
 
     // Record moderate long position (50 shares at 0.50 = 25 notional, well within 100 limit)
-    risk.record_fill("cond1", "token_yes", Side::Buy, Decimal::from(50), Decimal::from(25));
+    risk.record_fill(
+        "cond1",
+        "token_yes",
+        Side::Buy,
+        Decimal::from(50),
+        Decimal::from(25),
+    );
 
     let quotes_long = strategy::rebate_mm::generate_quotes(&cfg, &market, &books, &risk);
     assert!(!quotes_long.is_empty());
     let (bid_l, _ask_l) = &quotes_long[0];
 
     // When long, bid should be lower or equal (less eager to buy more)
-    assert!(bid_l.price <= bid_n.price, "long inventory should lower bid price: got {} vs baseline {}", bid_l.price, bid_n.price);
+    assert!(
+        bid_l.price <= bid_n.price,
+        "long inventory should lower bid price: got {} vs baseline {}",
+        bid_l.price,
+        bid_n.price
+    );
 }
 
 /// Decay strategy: full paper-mode buy cycle.
 #[tokio::test]
 async fn decay_buy_paper_cycle() {
-    use chrono::{Utc, Duration as ChronoDuration};
+    use chrono::{Duration as ChronoDuration, Utc};
 
     let mut cfg = test_config();
     cfg.decay_enabled = true;
@@ -701,7 +766,11 @@ async fn decay_buy_paper_cycle() {
 
     let mut tracker = strategy::decay::DecayTracker::new();
     let candidates = strategy::decay::scan_candidates(&[market.clone()], &books, &cfg, now);
-    assert_eq!(candidates.len(), 1, "should find exactly one decay candidate");
+    assert_eq!(
+        candidates.len(),
+        1,
+        "should find exactly one decay candidate"
+    );
 
     let intent = strategy::decay::evaluate_decay_buy(&candidates[0], &cfg, &tracker, dec!(1000))
         .expect("should produce a buy intent");
@@ -712,14 +781,25 @@ async fn decay_buy_paper_cycle() {
     // Place via paper router
     let paper = PaperEngine::new();
     let router = OrderRouter::Paper(paper.clone());
-    let result = router.place(&intent, &books).await.expect("paper place should succeed");
-    assert!(result.paper_fill.is_some(), "FOK buy at ask should fill in paper mode");
+    let result = router
+        .place(&intent, &books)
+        .await
+        .expect("paper place should succeed");
+    assert!(
+        result.paper_fill.is_some(),
+        "FOK buy at ask should fill in paper mode"
+    );
 
     // Record in tracker
     let pf = result.paper_fill.unwrap();
     tracker.record_fill(
-        "decay_cond", "decay_yes", "Yes",
-        pf.size, intent.price, false, dec!(0),
+        "decay_cond",
+        "decay_yes",
+        "Yes",
+        pf.size,
+        intent.price,
+        false,
+        dec!(0),
     );
     assert_eq!(tracker.position_count(), 1);
     assert!(tracker.deployed_capital() > Decimal::ZERO);
@@ -734,7 +814,7 @@ async fn decay_buy_paper_cycle() {
 /// Decay strategy: crypto tag exclusion.
 #[tokio::test]
 async fn decay_excludes_crypto_markets() {
-    use chrono::{Utc, Duration as ChronoDuration};
+    use chrono::{Duration as ChronoDuration, Utc};
 
     let cfg = test_config();
     let now = Utc::now();
@@ -744,8 +824,16 @@ async fn decay_excludes_crypto_markets() {
         condition_id: "btc_cond".into(),
         question: "BTC above 100k?".into(),
         tokens: vec![
-            TokenInfo { token_id: "btc_yes".into(), outcome: "Yes".into(), price: dec!(0.96) },
-            TokenInfo { token_id: "btc_no".into(), outcome: "No".into(), price: dec!(0.04) },
+            TokenInfo {
+                token_id: "btc_yes".into(),
+                outcome: "Yes".into(),
+                price: dec!(0.96),
+            },
+            TokenInfo {
+                token_id: "btc_no".into(),
+                outcome: "No".into(),
+                price: dec!(0.04),
+            },
         ],
         neg_risk: false,
         neg_risk_market_id: None,

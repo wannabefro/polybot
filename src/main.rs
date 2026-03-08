@@ -1,28 +1,29 @@
+mod auth;
 mod config;
 mod geoblock;
-mod auth;
+mod intelligence;
 mod market;
+mod ops;
 mod order;
 mod risk;
 mod strategy;
-mod intelligence;
-mod ops;
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::Result;
+use polymarket_client_sdk::clob::types::response::OrderBookSummaryResponse;
 use polymarket_client_sdk::clob::types::Side;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
 use crate::intelligence::signal;
 use crate::market::book::BookStore;
-use crate::market::ws::FeedEvent;
+use crate::market::ws::{FeedEvent, ResyncFailureReason};
 use crate::ops::metrics::Metrics;
 use crate::ops::rewards::RewardTracker;
 use crate::order::router::OrderRouter;
@@ -63,13 +64,64 @@ impl PendingMarkout {
             token_id,
             side,
             fill_price,
-            tick_size: if tick_size > Decimal::ZERO { tick_size } else { dec!(0.01) },
+            tick_size: if tick_size > Decimal::ZERO {
+                tick_size
+            } else {
+                dec!(0.01)
+            },
             at_5s: now + Duration::from_secs(5),
             at_30s: now + Duration::from_secs(30),
             done_5s: false,
             done_30s: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WsResyncState {
+    Live,
+    InProgress,
+    RetryPending { reason: ResyncFailureReason },
+}
+
+fn begin_resync(books: &BookStore, state: &mut WsResyncState) {
+    books.pause();
+    *state = WsResyncState::InProgress;
+}
+
+fn record_resync_failure(
+    books: &BookStore,
+    state: &mut WsResyncState,
+    reason: ResyncFailureReason,
+) {
+    books.pause();
+    *state = WsResyncState::RetryPending { reason };
+}
+
+fn finish_resync(
+    books: &BookStore,
+    state: &mut WsResyncState,
+    asset_ids: &[String],
+    snapshots: &[OrderBookSummaryResponse],
+) -> bool {
+    if restore_authoritative_books(books, asset_ids, snapshots) {
+        if books.is_paused() {
+            books.resume();
+        }
+        *state = WsResyncState::Live;
+        true
+    } else {
+        record_resync_failure(
+            books,
+            state,
+            ResyncFailureReason::AuthoritativeRestoreFailed,
+        );
+        false
+    }
+}
+
+fn should_apply_book_snapshot(state: WsResyncState) -> bool {
+    matches!(state, WsResyncState::Live)
 }
 
 fn quote_key(condition_id: &str, intent: &crate::order::pipeline::OrderIntent) -> String {
@@ -141,6 +193,43 @@ fn scale_intent_size(
     }
     intent.size = size;
     true
+}
+
+fn restore_authoritative_books(
+    books: &BookStore,
+    asset_ids: &[String],
+    snapshots: &[OrderBookSummaryResponse],
+) -> bool {
+    let expected: HashSet<&str> = asset_ids.iter().map(String::as_str).collect();
+    books.retain(asset_ids);
+    if snapshots.len() != expected.len() {
+        return false;
+    }
+
+    let mut restored = HashSet::new();
+
+    for snapshot in snapshots {
+        let asset_id = snapshot.asset_id.to_string();
+        if !expected.contains(asset_id.as_str()) || !restored.insert(asset_id.clone()) {
+            return false;
+        }
+
+        let snapshot_hash = snapshot.hash.clone();
+        let already_matches =
+            books.get(&asset_id).is_some() && books.hash(&asset_id) == snapshot_hash;
+        let applied = already_matches || books.apply_snapshot(snapshot);
+        let stored = books.get(&asset_id);
+        let hash_confirmed = match snapshot_hash.as_deref() {
+            Some(hash) => stored.as_ref().and_then(|book| book.hash.as_deref()) == Some(hash),
+            None => stored.is_some(),
+        };
+
+        if !applied || !hash_confirmed {
+            return false;
+        }
+    }
+
+    restored.len() == expected.len()
 }
 
 fn is_transient_order_rejection(msg: &str) -> bool {
@@ -270,8 +359,14 @@ fn process_fill(
         ));
         info!(
             "💰 FILL (paper) {} {} @ ${} (${:.2})",
-            if matches!(side, Side::Buy) { "BUY" } else { "SELL" },
-            fill.size, fill.price, fill.notional,
+            if matches!(side, Side::Buy) {
+                "BUY"
+            } else {
+                "SELL"
+            },
+            fill.size,
+            fill.price,
+            fill.notional,
         );
 
         if needs_hedge {
@@ -296,8 +391,16 @@ fn process_fill(
     // Live mode: CLOB reported a match (e.g. FOK/IOC filled)
     if result.live_matched {
         // Use actual fill amounts from CLOB, not intent amounts
-        let size = if result.fill_size > Decimal::ZERO { result.fill_size } else { intent.size };
-        let notional = if result.fill_notional > Decimal::ZERO { result.fill_notional } else { intent.price * intent.size };
+        let size = if result.fill_size > Decimal::ZERO {
+            result.fill_size
+        } else {
+            intent.size
+        };
+        let notional = if result.fill_notional > Decimal::ZERO {
+            result.fill_notional
+        } else {
+            intent.price * intent.size
+        };
         risk_engine.record_fill(condition_id, &intent.token_id, intent.side, size, notional);
         metrics.inc_fills();
         let fill_price = if !size.is_zero() {
@@ -311,8 +414,15 @@ fn process_fill(
             fill_price,
             tick_size,
         ));
-        let side_str = if matches!(intent.side, Side::Buy) { "BUY" } else { "SELL" };
-        info!("💰 FILL {} {} @ ${} (${:.2})", side_str, size, intent.price, notional);
+        let side_str = if matches!(intent.side, Side::Buy) {
+            "BUY"
+        } else {
+            "SELL"
+        };
+        info!(
+            "💰 FILL {} {} @ ${} (${:.2})",
+            side_str, size, intent.price, notional
+        );
 
         if needs_hedge {
             info!("⏱️ fill needs hedge — will unwind in 2min if complement doesn't fill");
@@ -378,10 +488,8 @@ async fn main() -> Result<()> {
     let auth_ctx = auth::init(&cfg).await?;
 
     // ── Phase 3: Market discovery + data feeds ─────────────────
-    let (_disc_handle, universe_rx) =
-        market::discovery::spawn(&cfg, auth_ctx.client.clone());
-    let (_ws_handle, mut feed_rx) =
-        market::ws::spawn(&cfg, universe_rx.clone());
+    let (_disc_handle, universe_rx) = market::discovery::spawn(&cfg, auth_ctx.client.clone());
+    let (_ws_handle, mut feed_rx) = market::ws::spawn(&cfg, universe_rx.clone());
 
     let books = BookStore::new();
 
@@ -448,8 +556,8 @@ async fn main() -> Result<()> {
 
     // ── Refresh CLOB balance cache so orders aren't rejected ──
     {
-        use polymarket_client_sdk::clob::types::AssetType;
         use polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest;
+        use polymarket_client_sdk::clob::types::AssetType;
         let req = BalanceAllowanceRequest::builder()
             .asset_type(AssetType::Collateral)
             .build();
@@ -491,6 +599,7 @@ async fn main() -> Result<()> {
     let mut live_nav = cfg.nav_usdc;
     let mut live_nav_initialized = false;
     let mut ws_first_quotable_logged = false;
+    let mut ws_resync_state = WsResyncState::Live;
 
     info!(
         paper_mode = cfg.paper_mode,
@@ -560,7 +669,36 @@ async fn main() -> Result<()> {
             // ── WS book updates → BookStore ──
             Some(event) = feed_rx.recv() => {
                 match event {
+                    FeedEvent::ResyncStarted => {
+                        begin_resync(&books, &mut ws_resync_state);
+                    }
+                    FeedEvent::ResyncFailed { reason } => {
+                        record_resync_failure(&books, &mut ws_resync_state, reason);
+                        warn!(?reason, "ws: authoritative resync retry pending");
+                    }
+                    FeedEvent::AuthoritativeSnapshots { asset_ids, books: snapshots } => {
+                        if finish_resync(&books, &mut ws_resync_state, &asset_ids, &snapshots) {
+                            info!(
+                                assets = asset_ids.len(),
+                                "book: resumed quoting after authoritative resync"
+                            );
+                        } else {
+                            warn!(
+                                expected = asset_ids.len(),
+                                received = snapshots.len(),
+                                "book: authoritative resync incomplete; keeping quoting paused"
+                            );
+                        }
+                    }
                     FeedEvent::BookSnapshot { asset_id, update } => {
+                        if !should_apply_book_snapshot(ws_resync_state) {
+                            debug!(
+                                ?ws_resync_state,
+                                asset_id = %asset_id,
+                                "ws: ignoring book snapshot while authoritative resync is pending"
+                            );
+                            continue;
+                        }
                         let has_bids = !update.bids.is_empty();
                         let has_asks = !update.asks.is_empty();
                         books.apply(&asset_id, &update);
@@ -572,11 +710,6 @@ async fn main() -> Result<()> {
                                 "ws: first quotable book received"
                             );
                             ws_first_quotable_logged = true;
-                        }
-                        // After first successful update post-reconnect, resume quoting
-                        if books.is_paused() {
-                            books.resume();
-                            info!("book: resumed quoting after resync");
                         }
                     }
                 }
@@ -600,7 +733,7 @@ async fn main() -> Result<()> {
 
                 // Book paused (WS reconnect in progress) → skip quoting
                 if books.is_paused() {
-                    warn!("book: paused — skipping quoting tick");
+                    warn!(?ws_resync_state, "book: paused — skipping quoting tick");
                     continue;
                 }
 
@@ -1307,7 +1440,11 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use polymarket_client_sdk::clob::types::response::OrderSummary;
     use polymarket_client_sdk::clob::types::OrderType;
+    use polymarket_client_sdk::clob::types::TickSize;
+    use polymarket_client_sdk::types::{B256, U256};
     use rust_decimal_macros::dec;
 
     fn test_quote(age_secs: u64, price: Decimal, size: Decimal) -> ActiveQuote {
@@ -1332,6 +1469,52 @@ mod tests {
             is_unwind: false,
             strategy_tag: "rebate",
         }
+    }
+
+    fn test_snapshot(asset_id: U256, hash: &str) -> OrderBookSummaryResponse {
+        OrderBookSummaryResponse::builder()
+            .market(B256::ZERO)
+            .asset_id(asset_id)
+            .timestamp(chrono::DateTime::<Utc>::from_timestamp_millis(2_000).unwrap())
+            .bids(vec![OrderSummary::builder()
+                .price(dec!(0.48))
+                .size(dec!(100))
+                .build()])
+            .asks(vec![OrderSummary::builder()
+                .price(dec!(0.52))
+                .size(dec!(100))
+                .build()])
+            .min_order_size(dec!(1))
+            .neg_risk(false)
+            .tick_size(TickSize::Hundredth)
+            .hash(hash.to_string())
+            .build()
+    }
+
+    fn test_book_update(
+        asset_id: U256,
+        timestamp_ms: i64,
+        hash: &str,
+        bid: Decimal,
+    ) -> polymarket_client_sdk::clob::ws::types::response::BookUpdate {
+        polymarket_client_sdk::clob::ws::types::response::BookUpdate::builder()
+            .asset_id(asset_id)
+            .market(B256::ZERO)
+            .timestamp(timestamp_ms)
+            .bids(vec![
+                polymarket_client_sdk::clob::ws::types::response::OrderBookLevel::builder()
+                    .price(bid)
+                    .size(dec!(100))
+                    .build(),
+            ])
+            .asks(vec![
+                polymarket_client_sdk::clob::ws::types::response::OrderBookLevel::builder()
+                    .price(dec!(0.52))
+                    .size(dec!(100))
+                    .build(),
+            ])
+            .hash(hash.into())
+            .build()
     }
 
     #[test]
@@ -1384,5 +1567,97 @@ mod tests {
             1,
             Duration::from_secs(15),
         ));
+    }
+
+    #[test]
+    fn authoritative_restore_requires_complete_snapshot_set() {
+        let books = BookStore::new();
+        let asset_ids = vec!["7".to_string(), "8".to_string()];
+        let snapshots = vec![test_snapshot(U256::from(7), "hash-7")];
+
+        assert!(!restore_authoritative_books(&books, &asset_ids, &snapshots));
+    }
+
+    #[test]
+    fn authoritative_restore_accepts_matching_existing_hash() {
+        let books = BookStore::new();
+        let update = test_book_update(U256::from(7), 3_000, "hash-7", dec!(0.48));
+        assert!(books.apply("7", &update));
+
+        assert!(restore_authoritative_books(
+            &books,
+            &["7".to_string()],
+            &[test_snapshot(U256::from(7), "hash-7")],
+        ));
+    }
+
+    #[test]
+    fn resync_failure_keeps_books_paused_until_success() {
+        let books = BookStore::new();
+        let mut state = WsResyncState::Live;
+
+        begin_resync(&books, &mut state);
+        assert!(books.is_paused());
+        assert_eq!(state, WsResyncState::InProgress);
+
+        record_resync_failure(&books, &mut state, ResyncFailureReason::SnapshotFetchFailed);
+        assert!(books.is_paused());
+        assert_eq!(
+            state,
+            WsResyncState::RetryPending {
+                reason: ResyncFailureReason::SnapshotFetchFailed,
+            }
+        );
+
+        assert!(finish_resync(
+            &books,
+            &mut state,
+            &["7".to_string()],
+            &[test_snapshot(U256::from(7), "hash-7")],
+        ));
+        assert!(!books.is_paused());
+        assert_eq!(state, WsResyncState::Live);
+    }
+
+    #[test]
+    fn book_updates_are_ignored_until_resync_is_live() {
+        let books = BookStore::new();
+        let initial = test_book_update(U256::from(7), 1_000, "initial", dec!(0.40));
+        assert!(books.apply("7", &initial));
+
+        let pending = test_book_update(U256::from(7), 5_000, "pending", dec!(0.49));
+        let mut state = WsResyncState::Live;
+        begin_resync(&books, &mut state);
+
+        if should_apply_book_snapshot(state) {
+            books.apply("7", &pending);
+        }
+
+        let still_old = books.get("7").expect("book preserved while resync pending");
+        assert_eq!(still_old.hash.as_deref(), Some("initial"));
+        assert_eq!(
+            still_old.bids.best().map(|level| level.price),
+            Some(dec!(0.40))
+        );
+
+        assert!(finish_resync(
+            &books,
+            &mut state,
+            &["7".to_string()],
+            &[test_snapshot(U256::from(7), "hash-7")],
+        ));
+        assert_eq!(state, WsResyncState::Live);
+
+        let live = test_book_update(U256::from(7), 6_000, "live", dec!(0.50));
+        if should_apply_book_snapshot(state) {
+            books.apply("7", &live);
+        }
+
+        let restored = books.get("7").expect("book updated after resync");
+        assert_eq!(restored.hash.as_deref(), Some("live"));
+        assert_eq!(
+            restored.bids.best().map(|level| level.price),
+            Some(dec!(0.50))
+        );
     }
 }

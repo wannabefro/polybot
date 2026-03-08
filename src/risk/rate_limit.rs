@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn exhausts_bucket() {
         let rl = RateLimiter::new(2.0); // 1.4 effective + 10 burst = 11.4
-        // Drain all tokens
+                                        // Drain all tokens
         let mut ok_count = 0;
         for _ in 0..20 {
             if rl.try_acquire().is_ok() {
@@ -155,7 +155,10 @@ mod tests {
                 ok_count += 1;
             }
         }
-        assert!(ok_count >= 5, "burst should allow at least 5 immediate tokens");
+        assert!(
+            ok_count >= 5,
+            "burst should allow at least 5 immediate tokens"
+        );
     }
 
     #[test]

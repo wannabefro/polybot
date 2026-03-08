@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 
-
 /// Heartbeat health monitor — tracks the last known heartbeat success.
 #[derive(Debug)]
 #[allow(dead_code)]
