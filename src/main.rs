@@ -727,9 +727,19 @@ async fn main() -> Result<()> {
                 risk_engine.set_daily_pnl(mtm_pnl);
                 metrics.update_pnl(mtm_pnl);
 
-                if risk_engine.is_halted() {
-                    continue;
+                // Auto-resume from heartbeat halt once heartbeat is fresh again
+                // MUST be before the halt check so we can recover
+                if risk_engine.is_halted() && !heartbeat.is_stale() {
+                    info!("heartbeat recovered — resuming from halt");
+                    risk_engine.resume();
                 }
+
+                // Clone universe once - needed for both main quoting and decay
+                let universe = universe_rx.borrow().clone();
+
+                if risk_engine.is_halted() {
+                    // Skip main quoting but still run decay below
+                } else {
 
                 // Book paused (WS reconnect in progress) → skip quoting
                 if books.is_paused() {
@@ -759,11 +769,6 @@ async fn main() -> Result<()> {
                     }
                     risk_engine.halt("stale heartbeat");
                     continue;
-                }
-
-                // Auto-resume from heartbeat halt once heartbeat is fresh again
-                if risk_engine.is_halted() {
-                    risk_engine.resume();
                 }
 
                 // ── Live fill detection: poll CLOB for resting order fills ──
@@ -925,8 +930,6 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-
-                let universe = universe_rx.borrow().clone();
 
                 // ── Build neg-risk pair groups (Gap #6) ──
                 // Group markets by neg_risk_market_id. Only quote if ALL tokens
@@ -1262,8 +1265,11 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                } // end of !skip_quoting block - decay runs even when halted
 
                 // ── Time-decay strategy ──
+                // Note: Decay runs even when main quoting is halted.
+                // It's a passive FOK-based strategy with its own capital limits.
                 if cfg.decay_enabled {
                     // Cleanup resolved markets
                     decay_tracker.cleanup_resolved(&universe);
