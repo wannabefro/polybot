@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn scan_sports_market_within_sports_window() {
         let now = Utc::now();
-        // 3 minutes = within 5 min sports window
+        // 3 minutes = within 1 hour sports window
         let end = now + ChronoDuration::minutes(3);
         let market = make_market(
             "c1",
@@ -958,15 +958,15 @@ mod tests {
         assert_eq!(
             candidates.len(),
             1,
-            "sports market within 5min window should be found"
+            "sports market within 1 hour window should be found"
         );
     }
 
     #[test]
     fn scan_sports_market_outside_sports_window_skipped() {
         let now = Utc::now();
-        // 10 minutes = outside 5 min sports window, but within 24h normal window
-        let end = now + ChronoDuration::minutes(10);
+        // 2 hours = outside 1 hour sports window, but within 24h normal window
+        let end = now + ChronoDuration::hours(2);
         let market = make_market(
             "c1",
             Some(end),
@@ -980,7 +980,7 @@ mod tests {
         let candidates = scan_candidates(&[market], &books, &config, now);
         assert!(
             candidates.is_empty(),
-            "sports market outside 5min window should be skipped"
+            "sports market outside 1 hour window should be skipped"
         );
     }
 

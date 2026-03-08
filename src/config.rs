@@ -145,7 +145,7 @@ impl Config {
             decay_max_bet_usdc: parse_env("POLYBOT_DECAY_MAX_BET_USDC", "15.0")?,
             decay_sports_max_bet_usdc: parse_env("POLYBOT_DECAY_SPORTS_MAX_BET_USDC", "5.0")?,
             decay_window_hours: parse_env("POLYBOT_DECAY_WINDOW_HOURS", "24.0")?,
-            decay_sports_window_hours: parse_env("POLYBOT_DECAY_SPORTS_WINDOW_HOURS", "0.083")?,
+            decay_sports_window_hours: parse_env("POLYBOT_DECAY_SPORTS_WINDOW_HOURS", "1.0")?,
             decay_nav_fraction: parse_env("POLYBOT_DECAY_NAV_FRACTION", "0.70")?,
             decay_excluded_tags: env_or(
                 "POLYBOT_DECAY_EXCLUDED_TAGS",
@@ -288,7 +288,7 @@ pub fn test_config() -> Config {
         decay_max_bet_usdc: 15.0,
         decay_sports_max_bet_usdc: 5.0,
         decay_window_hours: 24.0,
-        decay_sports_window_hours: 0.083,
+        decay_sports_window_hours: 1.0,
         decay_nav_fraction: 0.70,
         decay_excluded_tags: vec![
             "crypto".into(),
