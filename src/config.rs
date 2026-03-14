@@ -76,6 +76,7 @@ pub struct Config {
     pub decay_sports_max_bet_usdc: f64,
     pub decay_window_hours: f64,
     pub decay_sports_window_hours: f64,
+    pub decay_sports_fallback_max_hours: f64,
     pub decay_nav_fraction: f64,
     pub decay_excluded_tags: Vec<String>,
 }
@@ -146,6 +147,10 @@ impl Config {
             decay_sports_max_bet_usdc: parse_env("POLYBOT_DECAY_SPORTS_MAX_BET_USDC", "5.0")?,
             decay_window_hours: parse_env("POLYBOT_DECAY_WINDOW_HOURS", "24.0")?,
             decay_sports_window_hours: parse_env("POLYBOT_DECAY_SPORTS_WINDOW_HOURS", "1.0")?,
+            decay_sports_fallback_max_hours: parse_env(
+                "POLYBOT_DECAY_SPORTS_FALLBACK_MAX_HOURS",
+                "6.0",
+            )?,
             decay_nav_fraction: parse_env("POLYBOT_DECAY_NAV_FRACTION", "0.70")?,
             decay_excluded_tags: env_or(
                 "POLYBOT_DECAY_EXCLUDED_TAGS",
@@ -289,6 +294,7 @@ pub fn test_config() -> Config {
         decay_sports_max_bet_usdc: 5.0,
         decay_window_hours: 24.0,
         decay_sports_window_hours: 1.0,
+        decay_sports_fallback_max_hours: 6.0,
         decay_nav_fraction: 0.70,
         decay_excluded_tags: vec![
             "crypto".into(),
@@ -383,6 +389,7 @@ pub(crate) mod tests {
         assert_eq!(cfg.max_one_sided_inventory, 0.04); // 4%
         assert_eq!(cfg.daily_loss_stop, 0.05); // 5%
         assert_eq!(cfg.mean_revert_max_nav_frac, 0.005); // 0.5%
+        assert_eq!(cfg.decay_sports_fallback_max_hours, 6.0);
     }
 
     #[test]

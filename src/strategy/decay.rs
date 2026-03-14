@@ -279,6 +279,7 @@ pub fn scan_candidates(
     let sports_min_price = Decimal::try_from(config.decay_sports_min_price).unwrap_or(dec!(0.90));
     let default_window_secs = (config.decay_window_hours * 3600.0) as i64;
     let sports_window_secs = (config.decay_sports_window_hours * 3600.0) as i64;
+    let sports_fallback_max_secs = (config.decay_sports_fallback_max_hours * 3600.0) as i64;
     // Max game duration for in-progress sports (3.5 hours = 12600 seconds)
     const MAX_GAME_DURATION_SECS: i64 = 12600;
 
@@ -345,15 +346,21 @@ pub fn scan_candidates(
                         is_within_window = true;
                         fallback_data = None;
                     } else {
-                        // Outside window: try live-book fallback
-                        let fb = sports_live_book_fallback(market, books, sports_min_price);
-                        if fb.is_some() {
-                            sports_in_progress += 1;
-                        }
                         is_game_in_progress = false;
-                        used_live_book_fallback = fb.is_some();
-                        is_within_window = fb.is_some();
-                        fallback_data = fb;
+                        if secs_remaining > sports_fallback_max_secs {
+                            used_live_book_fallback = false;
+                            is_within_window = false;
+                            fallback_data = None;
+                        } else {
+                            // Outside window but still near enough: try live-book fallback.
+                            let fb = sports_live_book_fallback(market, books, sports_min_price);
+                            if fb.is_some() {
+                                sports_in_progress += 1;
+                            }
+                            used_live_book_fallback = fb.is_some();
+                            is_within_window = fb.is_some();
+                            fallback_data = fb;
+                        }
                     }
                 }
                 None => {
@@ -463,10 +470,16 @@ pub fn scan_candidates(
         }
 
         // For in-progress games, estimate time to resolution.
-        // For fallback-qualified sports markets, use a conservative full-game-duration horizon.
+        // For fallback-qualified sports markets with a future end_date, keep the
+        // real horizon so far-future markets do not rank like near-term games.
+        // Only missing/invalid timing metadata falls back to the conservative
+        // full-game-duration horizon.
         let secs_remaining_for_score = secs_remaining_opt.unwrap_or(0);
         let secs_to_resolution = if used_live_book_fallback {
-            MAX_GAME_DURATION_SECS
+            match secs_remaining_opt {
+                Some(secs_remaining) if secs_remaining > 0 => secs_remaining,
+                _ => MAX_GAME_DURATION_SECS,
+            }
         } else if is_game_in_progress {
             let elapsed = -secs_remaining_for_score;
             (MAX_GAME_DURATION_SECS - elapsed).max(300)
@@ -515,6 +528,7 @@ pub fn scan_candidates(
             sports_min_price = %sports_min_price,
             window_hours = config.decay_window_hours,
             sports_window_hours = config.decay_sports_window_hours,
+            sports_fallback_max_hours = config.decay_sports_fallback_max_hours,
             sports_total,
             sports_in_progress,
             sports_pre_game,
@@ -543,6 +557,7 @@ pub fn scan_candidates(
             sports_min_price = %sports_min_price,
             window_hours = config.decay_window_hours,
             sports_window_hours = config.decay_sports_window_hours,
+            sports_fallback_max_hours = config.decay_sports_fallback_max_hours,
             sports_total,
             sports_in_progress,
             sports_candidates,
@@ -1622,6 +1637,69 @@ mod tests {
         assert_eq!(
             candidates[0].token_id, "tok_no",
             "fallback should choose the higher-confidence live-book side"
+        );
+    }
+
+    #[test]
+    fn scan_sports_fallback_scores_far_future_markets_lower() {
+        let now = Utc::now();
+        let sooner = now + ChronoDuration::hours(2);
+        let later = now + ChronoDuration::hours(5);
+        let markets = vec![
+            make_market(
+                "soon",
+                Some(sooner),
+                make_tokens("0.80", "0.20"),
+                vec!["Sports".to_string()],
+                false,
+            ),
+            make_market(
+                "later",
+                Some(later),
+                make_tokens("0.80", "0.20"),
+                vec!["Sports".to_string()],
+                false,
+            ),
+        ];
+        let books = make_two_sided_books(dec!(0.91), dec!(0.95), dec!(0.03), dec!(0.07));
+        let config = test_config();
+        let candidates = scan_candidates(&markets, &books, &config, now);
+
+        assert_eq!(
+            candidates.len(),
+            2,
+            "both fallback-qualified sports markets should be scanned"
+        );
+        assert_eq!(
+            candidates[0].condition_id, "soon",
+            "nearer fallback-qualified sports market should outrank farther future market"
+        );
+        assert!(
+            candidates[0].score > candidates[1].score,
+            "far-future sports market should score lower when fallback uses real future horizon"
+        );
+    }
+
+    #[test]
+    fn scan_sports_fallback_rejects_markets_beyond_max_future_horizon() {
+        let now = Utc::now();
+        let end = now + ChronoDuration::hours(8);
+        let market = make_market(
+            "far",
+            Some(end),
+            make_tokens("0.80", "0.20"),
+            vec!["Sports".to_string()],
+            false,
+        );
+        let books = make_two_sided_books(dec!(0.91), dec!(0.95), dec!(0.03), dec!(0.07));
+        let mut config = test_config();
+        config.decay_sports_fallback_max_hours = 6.0;
+
+        let candidates = scan_candidates(&[market], &books, &config, now);
+
+        assert!(
+            candidates.is_empty(),
+            "sports fallback should reject markets beyond the configured future horizon"
         );
     }
 }
