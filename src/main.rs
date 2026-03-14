@@ -593,7 +593,7 @@ async fn main() -> Result<()> {
         }
     }
     let mut decay_scan_tick = 0u32;
-    let mut reward_enabled = cfg.nav_usdc >= cfg.reward_min_nav_usdc;
+    let mut reward_enabled = cfg.nav_usdc >= cfg.reward_min_nav_usdc && !cfg.is_small_account();
     let mut mean_revert_enabled = cfg.nav_usdc >= cfg.mean_revert_min_nav_usdc;
     let mut max_markets = cfg.max_active_markets();
     let mut live_nav = cfg.nav_usdc;
@@ -650,7 +650,7 @@ async fn main() -> Result<()> {
                     // Re-evaluate strategy gates and market caps
                     let mut nav_cfg = cfg.clone();
                     nav_cfg.nav_usdc = new_nav;
-                    reward_enabled = new_nav >= cfg.reward_min_nav_usdc;
+                    reward_enabled = new_nav >= cfg.reward_min_nav_usdc && !nav_cfg.is_small_account();
                     mean_revert_enabled = new_nav >= cfg.mean_revert_min_nav_usdc;
                     max_markets = nav_cfg.max_active_markets();
 
@@ -1067,7 +1067,7 @@ async fn main() -> Result<()> {
                         }
 
                         let quotes = strategy::reward::evaluate_reward_quote(
-                            &cfg,
+                            &nav_cfg,
                             market,
                             &books,
                             &risk_engine,

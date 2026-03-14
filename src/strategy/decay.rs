@@ -183,25 +183,81 @@ fn score_opportunity(
     score
 }
 
-/// Check if a market is a sports market based on tags.
-fn is_sports_market(market: &TradableMarket) -> bool {
-    market.tags.iter().any(|t| {
-        let lower = t.to_lowercase();
-        lower.contains("sports")
-            || lower.contains("football")
-            || lower.contains("basketball")
-            || lower.contains("baseball")
-            || lower.contains("hockey")
-            || lower.contains("soccer")
-            || lower.contains("tennis")
-            || lower.contains("golf")
-            || lower.contains("boxing")
-            || lower.contains("mma")
-            || lower.contains("nfl")
-            || lower.contains("nba")
-            || lower.contains("mlb")
-            || lower.contains("nhl")
-            || lower.contains("ncaa")
+/// Candidate selected by the conservative live-book fallback for sports markets.
+struct LiveBookFallback {
+    /// Token to buy (the favored side determined purely from live book state).
+    token_id: String,
+    outcome: String,
+}
+
+/// Conservative live-book fallback for sports markets.
+///
+/// Used when end_date is missing or the market is outside the sports window.
+/// Selects the candidate token **from the live book**, not token.price metadata,
+/// so markets qualify even when timing metadata is stale or missing.
+///
+/// Conservative filters (all must pass):
+/// - Both tokens have a two-sided book (bid + ask present)
+/// - The favored side's live ask price >= sports_min_price
+/// - Spread on the favored side is not too wide (<= 0.06)
+/// - Visible best-ask size >= 1.0 (not junk)
+///
+/// Returns `Some(LiveBookFallback)` with the selected token and book-derived
+/// price/size, or `None` if any filter fails.
+fn sports_live_book_fallback(
+    market: &TradableMarket,
+    books: &BookStore,
+    sports_min_price: Decimal,
+) -> Option<LiveBookFallback> {
+    if market.tokens.len() != 2 {
+        return None;
+    }
+    let t0 = &market.tokens[0];
+    let t1 = &market.tokens[1];
+
+    let book0 = books.get(&t0.token_id)?;
+    let book1 = books.get(&t1.token_id)?;
+
+    // Both books must be two-sided (bid + ask required on each side)
+    let bid0 = book0.bids.best()?.price;
+    let ask0_level = book0.asks.best()?;
+    let ask0_price = ask0_level.price;
+    let ask0_size = ask0_level.size;
+
+    let bid1 = book1.bids.best()?.price;
+    let ask1_level = book1.asks.best()?;
+    let ask1_price = ask1_level.price;
+    let ask1_size = ask1_level.size;
+
+    // Find the favored side from live book state (not token metadata price)
+    let (fav_token, fav_ask_price, fav_ask_size, fav_bid) =
+        if ask0_price >= sports_min_price && ask1_price >= sports_min_price {
+            if ask0_price >= ask1_price {
+                (t0, ask0_price, ask0_size, bid0)
+            } else {
+                (t1, ask1_price, ask1_size, bid1)
+            }
+        } else if ask0_price >= sports_min_price {
+            (t0, ask0_price, ask0_size, bid0)
+        } else if ask1_price >= sports_min_price {
+            (t1, ask1_price, ask1_size, bid1)
+        } else {
+            return None;
+        };
+
+    // Spread must not be too wide
+    if fav_ask_price - fav_bid > dec!(0.06) {
+        return None;
+    }
+
+    // Visible size must not be junk
+    if fav_ask_size < dec!(1.0) {
+        return None;
+    }
+
+    Some(LiveBookFallback {
+        token_id: fav_token.token_id.clone(),
+        outcome: fav_token.outcome.clone(),
     })
 }
 
@@ -249,39 +305,78 @@ pub fn scan_candidates(
             continue;
         }
 
-        // Must have an end date
-        let end_date = match market.end_date {
-            Some(d) => d,
-            None => {
-                skip_no_end_date += 1;
-                continue;
-            }
-        };
-        let secs_remaining = (end_date - now).num_seconds();
-
-        // Determine if sports market
-        let is_sports = is_sports_market(market);
+        // Determine if sports market (check before end_date so fallback can apply)
+        let is_sports = market.is_sports();
         if is_sports {
             sports_total += 1;
         }
 
-        // Window check - different logic for sports vs normal
-        let is_game_in_progress =
-            is_sports && secs_remaining < 0 && secs_remaining > -MAX_GAME_DURATION_SECS;
-        let is_within_window = if is_sports {
-            if secs_remaining > 0 {
-                // Pre-game: must be within sports window
-                sports_pre_game += 1;
-                secs_remaining <= sports_window_secs
-            } else {
-                // In-progress: game must have started recently
-                sports_in_progress += 1;
-                secs_remaining > -MAX_GAME_DURATION_SECS
+        // Must have an end date for non-sports markets
+        let end_date_opt = market.end_date;
+        if !is_sports && end_date_opt.is_none() {
+            skip_no_end_date += 1;
+            continue;
+        }
+
+        // Compute secs_remaining if end_date is available
+        let secs_remaining_opt = end_date_opt.map(|d| (d - now).num_seconds());
+
+        // Window check: for sports try end_date window first, then live-book fallback.
+        let is_game_in_progress;
+        let used_live_book_fallback;
+        let is_within_window;
+        let fallback_data: Option<LiveBookFallback>;
+
+        if is_sports {
+            match secs_remaining_opt {
+                Some(secs_remaining) => {
+                    let in_progress =
+                        secs_remaining < 0 && secs_remaining > -MAX_GAME_DURATION_SECS;
+                    let within = if secs_remaining > 0 {
+                        sports_pre_game += 1;
+                        secs_remaining <= sports_window_secs
+                    } else {
+                        sports_in_progress += 1;
+                        in_progress
+                    };
+                    if within {
+                        is_game_in_progress = in_progress;
+                        used_live_book_fallback = false;
+                        is_within_window = true;
+                        fallback_data = None;
+                    } else {
+                        // Outside window: try live-book fallback
+                        let fb = sports_live_book_fallback(market, books, sports_min_price);
+                        if fb.is_some() {
+                            sports_in_progress += 1;
+                        }
+                        is_game_in_progress = false;
+                        used_live_book_fallback = fb.is_some();
+                        is_within_window = fb.is_some();
+                        fallback_data = fb;
+                    }
+                }
+                None => {
+                    // No end date: try live-book fallback
+                    skip_no_end_date += 1;
+                    let fb = sports_live_book_fallback(market, books, sports_min_price);
+                    if fb.is_some() {
+                        sports_in_progress += 1;
+                    }
+                    is_game_in_progress = false;
+                    used_live_book_fallback = fb.is_some();
+                    is_within_window = fb.is_some();
+                    fallback_data = fb;
+                }
             }
         } else {
-            // Normal markets: must end within window and not have ended yet
-            secs_remaining > 0 && secs_remaining <= default_window_secs
-        };
+            // Non-sports: secs_remaining_opt is always Some (we continued above if None)
+            let secs_remaining = secs_remaining_opt.unwrap();
+            is_game_in_progress = false;
+            used_live_book_fallback = false;
+            is_within_window = secs_remaining > 0 && secs_remaining <= default_window_secs;
+            fallback_data = None;
+        }
 
         if !is_within_window {
             skip_outside_window += 1;
@@ -303,7 +398,6 @@ pub fn scan_candidates(
             skip_tag_excluded += 1;
             continue;
         }
-
         // Use sports-specific min price for sports markets
         let min_price = if is_sports {
             sports_min_price
@@ -311,26 +405,31 @@ pub fn scan_candidates(
             default_min_price
         };
 
-        // Find the highest-priced token that exceeds min_price
-        let best_token = market
-            .tokens
-            .iter()
-            .filter(|t| t.price >= min_price)
-            .max_by_key(|t| t.price);
-
-        let token = match best_token {
-            Some(t) => t,
-            None => {
-                skip_low_price += 1;
-                if is_sports {
-                    sports_skip_price += 1;
+        // Token selection: fallback path uses live-book data (not token.price metadata).
+        // Normal path: find the highest-metadata-priced token that exceeds min_price.
+        let (selected_token_id, selected_outcome) = if used_live_book_fallback {
+            let fb = fallback_data.as_ref().unwrap();
+            (fb.token_id.clone(), fb.outcome.clone())
+        } else {
+            let best_token = market
+                .tokens
+                .iter()
+                .filter(|t| t.price >= min_price)
+                .max_by_key(|t| t.price);
+            match best_token {
+                Some(t) => (t.token_id.clone(), t.outcome.clone()),
+                None => {
+                    skip_low_price += 1;
+                    if is_sports {
+                        sports_skip_price += 1;
+                    }
+                    continue;
                 }
-                continue;
             }
         };
 
-        // Verify there's actually an ask available at a reasonable price
-        let book = match books.get(&token.token_id) {
+        // Get the book for the selected token
+        let book = match books.get(&selected_token_id) {
             Some(b) => b,
             None => {
                 skip_no_book += 1;
@@ -344,11 +443,12 @@ pub fn scan_candidates(
                 continue;
             }
         };
-        if best_ask > Decimal::ONE || best_ask < min_price {
+        // Fallback path: ask already validated by sports_live_book_fallback.
+        // Normal path: validate ask is within acceptable range.
+        if best_ask > Decimal::ONE || (!used_live_book_fallback && best_ask < min_price) {
             skip_low_price += 1;
             continue;
         }
-
         // Sum available liquidity across ask levels up to best_ask + 2 ticks.
         // For decay, we're willing to pay slightly above best ask to ensure fill.
         let sweep_ceiling = (best_ask + dec!(0.02)).min(Decimal::ONE);
@@ -362,17 +462,18 @@ pub fn scan_candidates(
             worst_price = level.price;
         }
 
-        // For in-progress games, estimate time to resolution
-        // (game already started, so remaining time is less than full game duration)
-        let secs_to_resolution = if is_game_in_progress {
-            // Estimate remaining time: max duration - elapsed time
-            let elapsed = -secs_remaining;
-            (MAX_GAME_DURATION_SECS - elapsed).max(300) // at least 5 min remaining
+        // For in-progress games, estimate time to resolution.
+        // For fallback-qualified sports markets, use a conservative full-game-duration horizon.
+        let secs_remaining_for_score = secs_remaining_opt.unwrap_or(0);
+        let secs_to_resolution = if used_live_book_fallback {
+            MAX_GAME_DURATION_SECS
+        } else if is_game_in_progress {
+            let elapsed = -secs_remaining_for_score;
+            (MAX_GAME_DURATION_SECS - elapsed).max(300)
         } else {
-            secs_remaining
+            secs_remaining_for_score
         };
-
-        let hours_to_end = secs_remaining as f64 / 3600.0;
+        let hours_to_end = secs_to_resolution as f64 / 3600.0;
 
         // Score the opportunity
         let score = score_opportunity(
@@ -384,8 +485,8 @@ pub fn scan_candidates(
 
         candidates.push(DecayCandidate {
             condition_id: market.condition_id.clone(),
-            token_id: token.token_id.clone(),
-            outcome: token.outcome.clone(),
+            token_id: selected_token_id,
+            outcome: selected_outcome,
             price: worst_price,
             hours_to_end,
             neg_risk: market.neg_risk,
@@ -1054,11 +1155,7 @@ mod tests {
                 tags: tags.iter().map(|s| s.to_string()).collect(),
                 end_date: None,
             };
-            assert!(
-                is_sports_market(&market),
-                "should detect {:?} as sports",
-                tags
-            );
+            assert!(market.is_sports(), "should detect {:?} as sports", tags);
         }
     }
 
@@ -1392,6 +1489,139 @@ mod tests {
         assert!(
             candidates[0].score >= candidates[1].score,
             "candidates should be sorted by score descending"
+        );
+    }
+
+    fn make_two_sided_books(
+        yes_bid: Decimal,
+        yes_ask: Decimal,
+        no_bid: Decimal,
+        no_ask: Decimal,
+    ) -> BookStore {
+        use polymarket_client_sdk::clob::ws::types::response::{BookUpdate, OrderBookLevel};
+        use polymarket_client_sdk::types::{B256, U256};
+        let books = BookStore::new();
+        for (token_id, bid, ask) in [("tok_yes", yes_bid, yes_ask), ("tok_no", no_bid, no_ask)] {
+            let bid_level = OrderBookLevel::builder().price(bid).size(dec!(50)).build();
+            let ask_level = OrderBookLevel::builder().price(ask).size(dec!(50)).build();
+            let update = BookUpdate::builder()
+                .asset_id(U256::ZERO)
+                .market(B256::ZERO)
+                .timestamp(1000)
+                .bids(vec![bid_level])
+                .asks(vec![ask_level])
+                .hash("test".into())
+                .build();
+            books.apply(token_id, &update);
+        }
+        books
+    }
+
+    #[test]
+    fn scan_sports_outside_window_qualifies_via_live_book_fallback() {
+        let now = Utc::now();
+        // 2 hours out: outside the 1-hour sports window
+        let end = now + ChronoDuration::hours(2);
+        // Live book qualifies even though token metadata price is below sports_min_price.
+        let market = make_market(
+            "c1",
+            Some(end),
+            make_tokens("0.80", "0.20"),
+            vec!["Sports".to_string()],
+            false,
+        );
+        let books = make_two_sided_books(dec!(0.91), dec!(0.95), dec!(0.03), dec!(0.07));
+        let config = test_config();
+        let candidates = scan_candidates(&[market], &books, &config, now);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "sports market outside window should qualify via live-book fallback"
+        );
+    }
+    #[test]
+    fn scan_sports_no_end_date_qualifies_via_live_book_fallback() {
+        let now = Utc::now();
+        // No end_date at all
+        // Live book qualifies even though token metadata price is below sports_min_price.
+        let market = make_market(
+            "c1",
+            None,
+            make_tokens("0.80", "0.20"),
+            vec!["Sports".to_string()],
+            false,
+        );
+        let books = make_two_sided_books(dec!(0.91), dec!(0.95), dec!(0.03), dec!(0.07));
+        let config = test_config();
+        let candidates = scan_candidates(&[market], &books, &config, now);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "sports market with no end_date should qualify via live-book fallback"
+        );
+    }
+
+    #[test]
+    fn scan_sports_fallback_rejects_wide_or_illiquid_book() {
+        let now = Utc::now();
+        let end = now + ChronoDuration::hours(2);
+
+        // Case 1: spread too wide (0.92 - 0.80 = 0.12 > 0.06 limit)
+        let market1 = make_market(
+            "c1",
+            Some(end),
+            make_tokens("0.80", "0.20"),
+            vec!["Sports".to_string()],
+            false,
+        );
+        let books1 = make_two_sided_books(dec!(0.80), dec!(0.92), dec!(0.03), dec!(0.07));
+        let config = test_config();
+        let candidates1 = scan_candidates(&[market1], &books1, &config, now);
+        assert!(
+            candidates1.is_empty(),
+            "wide spread should not qualify via fallback"
+        );
+
+        // Case 2: one-sided book (no bid on tok_yes, so fallback must fail)
+        let market2 = make_market(
+            "c2",
+            Some(end),
+            make_tokens("0.80", "0.20"),
+            vec!["Sports".to_string()],
+            false,
+        );
+        // make_books_with_ask gives ask-only (no bid) for tok_yes only
+        let books2 = make_books_with_ask("tok_yes", dec!(0.92));
+        let candidates2 = scan_candidates(&[market2], &books2, &config, now);
+        assert!(
+            candidates2.is_empty(),
+            "one-sided book should not qualify via fallback"
+        );
+    }
+
+    #[test]
+    fn scan_sports_fallback_selects_more_favored_live_book_side() {
+        let now = Utc::now();
+        let end = now + ChronoDuration::hours(2);
+        let market = make_market(
+            "c1",
+            Some(end),
+            make_tokens("0.80", "0.20"),
+            vec!["Sports".to_string()],
+            false,
+        );
+        let books = make_two_sided_books(dec!(0.87), dec!(0.91), dec!(0.89), dec!(0.93));
+        let config = test_config();
+        let candidates = scan_candidates(&[market], &books, &config, now);
+
+        assert_eq!(
+            candidates.len(),
+            1,
+            "fallback-qualified sports market should be selected"
+        );
+        assert_eq!(
+            candidates[0].token_id, "tok_no",
+            "fallback should choose the higher-confidence live-book side"
         );
     }
 }

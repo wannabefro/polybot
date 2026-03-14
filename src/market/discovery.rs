@@ -33,6 +33,30 @@ pub struct TradableMarket {
     pub end_date: Option<DateTime<Utc>>,
 }
 
+impl TradableMarket {
+    /// True when the market tags indicate a sports event.
+    pub fn is_sports(&self) -> bool {
+        self.tags.iter().any(|tag| {
+            let lower = tag.to_lowercase();
+            lower.contains("sports")
+                || lower.contains("football")
+                || lower.contains("basketball")
+                || lower.contains("baseball")
+                || lower.contains("hockey")
+                || lower.contains("soccer")
+                || lower.contains("tennis")
+                || lower.contains("golf")
+                || lower.contains("boxing")
+                || lower.contains("mma")
+                || lower.contains("nfl")
+                || lower.contains("nba")
+                || lower.contains("mlb")
+                || lower.contains("nhl")
+                || lower.contains("ncaa")
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenInfo {
     pub token_id: String,

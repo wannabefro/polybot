@@ -100,6 +100,32 @@ fn jitter_retry_delay() -> std::time::Duration {
     std::time::Duration::from_millis(jitter_ms)
 }
 
+fn prioritized_token_ids(
+    universe: &[TradableMarket],
+    max_ws_tokens: usize,
+    sports_first: bool,
+) -> Vec<String> {
+    let mut sorted: Vec<&TradableMarket> = universe.iter().collect();
+    sorted.sort_by(|a, b| {
+        let a_sports = sports_first && a.is_sports();
+        let b_sports = sports_first && b.is_sports();
+        b_sports
+            .cmp(&a_sports)
+            .then(b.rewards_active.cmp(&a.rewards_active))
+            .then(
+                b.volume_24h
+                    .partial_cmp(&a.volume_24h)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+
+    sorted
+        .iter()
+        .flat_map(|m| m.tokens.iter().map(|t| t.token_id.clone()))
+        .take(max_ws_tokens)
+        .collect()
+}
+
 /// Spawn the WebSocket feed manager.
 ///
 /// Watches the discovery universe and subscribes to orderbook streams
@@ -113,6 +139,7 @@ pub fn spawn(
 ) {
     let _stale_threshold = config.stale_feed_threshold;
     let max_ws_tokens = config.max_ws_tokens;
+    let sports_first = config.is_small_account();
     let clob_host = config.clob_host.clone();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -133,21 +160,10 @@ pub fn spawn(
         loop {
             // Collect all token IDs from the current universe.
             // Cap to max_ws_tokens to avoid overwhelming the WS server.
-            // Prioritize rewards-active markets (most profitable for small accounts).
+            // For small accounts, prioritize sports markets so the sports-first
+            // directional model gets live books; otherwise keep rewards priority.
             let universe = uni_rx.borrow_and_update().clone();
-            let mut sorted: Vec<&TradableMarket> = universe.iter().collect();
-            sorted.sort_by(|a, b| {
-                b.rewards_active.cmp(&a.rewards_active).then(
-                    b.volume_24h
-                        .partial_cmp(&a.volume_24h)
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                )
-            });
-            let new_ids: Vec<String> = sorted
-                .iter()
-                .flat_map(|m| m.tokens.iter().map(|t| t.token_id.clone()))
-                .take(max_ws_tokens)
-                .collect();
+            let new_ids = prioritized_token_ids(&universe, max_ws_tokens, sports_first);
 
             if !new_ids.is_empty() && (need_resubscribe || new_ids != current_ids) {
                 current_ids = new_ids.clone();
@@ -258,4 +274,64 @@ pub fn spawn(
     });
 
     (handle, event_rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prioritized_token_ids;
+    use crate::market::discovery::{TokenInfo, TradableMarket};
+    use rust_decimal_macros::dec;
+
+    fn make_market(
+        condition_id: &str,
+        token_id: &str,
+        tags: &[&str],
+        rewards_active: bool,
+        volume_24h: f64,
+    ) -> TradableMarket {
+        TradableMarket {
+            condition_id: condition_id.to_string(),
+            question: condition_id.to_string(),
+            tokens: vec![TokenInfo {
+                token_id: token_id.to_string(),
+                outcome: "Yes".to_string(),
+                price: dec!(0.5),
+            }],
+            neg_risk: false,
+            neg_risk_market_id: None,
+            min_tick_size: dec!(0.01),
+            min_order_size: dec!(1),
+            maker_fee_bps: dec!(0),
+            rewards_active,
+            rewards_max_spread: None,
+            rewards_min_size: None,
+            volume_24h,
+            tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            end_date: None,
+        }
+    }
+
+    #[test]
+    fn prioritized_token_ids_prefers_sports_for_small_accounts() {
+        let universe = vec![
+            make_market("reward", "tok_reward", &["Politics"], true, 100_000.0),
+            make_market("sports", "tok_sports", &["Sports"], false, 10.0),
+        ];
+
+        let ids = prioritized_token_ids(&universe, 1, true);
+
+        assert_eq!(ids, vec!["tok_sports".to_string()]);
+    }
+
+    #[test]
+    fn prioritized_token_ids_keeps_reward_priority_for_non_small_accounts() {
+        let universe = vec![
+            make_market("reward", "tok_reward", &["Politics"], true, 100_000.0),
+            make_market("sports", "tok_sports", &["Sports"], false, 10.0),
+        ];
+
+        let ids = prioritized_token_ids(&universe, 1, false);
+
+        assert_eq!(ids, vec!["tok_reward".to_string()]);
+    }
 }

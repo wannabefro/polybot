@@ -274,6 +274,9 @@ pub fn evaluate_reward_quote(
     if !market.rewards_active {
         return Vec::new();
     }
+    if config.is_small_account() {
+        return Vec::new();
+    }
 
     // For binary markets (2 tokens): provide two-sided liquidity using BUY orders only.
     // BUY YES at bid_price + BUY NO at complement of ask_price.
@@ -1082,5 +1085,20 @@ mod tests {
         assert!(!result.is_empty());
         let (bid, _ask) = &result[0];
         assert!(bid.size >= dec!(25), "size should respect rewards_min_size");
+    }
+
+    #[test]
+    fn reward_quote_skips_small_account() {
+        let mut config = test_config();
+        // Force small-account threshold so is_small_account() returns true
+        config.small_account_nav_threshold = 1_000_000.0;
+        let market = make_market(true);
+        let books = make_book_store("0.48", "0.52");
+        let risk = RiskEngine::new(config.clone());
+
+        assert!(
+            evaluate_reward_quote(&config, &market, &books, &risk).is_empty(),
+            "small accounts must not generate reward quotes"
+        );
     }
 }
