@@ -125,7 +125,7 @@ impl Config {
             neg_risk_stale_secs: parse_env("POLYBOT_NR_STALE_SECS", "10")?,
             quote_tick_secs: parse_env("POLYBOT_QUOTE_TICK_SECS", "10")?,
             quote_max_age: Duration::from_secs(parse_env("POLYBOT_QUOTE_MAX_AGE_SECS", "60")?),
-            max_ws_tokens: parse_env("POLYBOT_MAX_WS_TOKENS", "500")?,
+            max_ws_tokens: parse_env("POLYBOT_MAX_WS_TOKENS", "1500")?,
             scalper_min_spread_ticks: parse_env("POLYBOT_SCALPER_MIN_SPREAD_TICKS", "4")?,
             scalper_min_touch_notional_usdc: parse_env(
                 "POLYBOT_SCALPER_MIN_TOUCH_NOTIONAL_USDC",
@@ -275,7 +275,7 @@ pub fn test_config() -> Config {
         neg_risk_stale_secs: 10,
         quote_tick_secs: 10,
         quote_max_age: Duration::from_secs(20),
-        max_ws_tokens: 500,
+        max_ws_tokens: 1500,
         scalper_min_spread_ticks: 4,
         scalper_min_touch_notional_usdc: 10.0,
         scalper_min_vol_24h: 1000.0,
