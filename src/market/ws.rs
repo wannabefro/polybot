@@ -16,6 +16,8 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::market::discovery::TradableMarket;
 
+const AUTHORITATIVE_BOOK_BATCH_SIZE: usize = 200;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResyncFailureReason {
     InvalidAssetIds,
@@ -64,35 +66,78 @@ async fn fetch_authoritative_books(
     };
 
     let expected: HashSet<String> = asset_ids.iter().cloned().collect();
+    let batch_count = authoritative_batch_count(requests.len());
     for (attempt, backoff_secs) in [1_u64, 2, 4].into_iter().enumerate() {
-        match client.order_books(&requests).await {
-            Ok(books) => {
-                let returned: HashSet<String> =
-                    books.iter().map(|book| book.asset_id.to_string()).collect();
-                if returned == expected && books.len() == requests.len() {
-                    return Some(books);
-                }
+        let mut aggregated = Vec::with_capacity(requests.len());
+        let mut fetch_failed = false;
 
-                warn!(
-                    attempt = attempt + 1,
-                    expected = requests.len(),
-                    received = books.len(),
-                    "ws: authoritative resync returned incomplete book set"
-                );
+        for (batch_idx, (request_batch, asset_batch)) in requests
+            .chunks(AUTHORITATIVE_BOOK_BATCH_SIZE)
+            .zip(asset_ids.chunks(AUTHORITATIVE_BOOK_BATCH_SIZE))
+            .enumerate()
+        {
+            match client.order_books(request_batch).await {
+                Ok(mut books) => {
+                    let batch_expected: HashSet<String> = asset_batch.iter().cloned().collect();
+                    let batch_returned: HashSet<String> =
+                        books.iter().map(|book| book.asset_id.to_string()).collect();
+                    if batch_returned != batch_expected || books.len() != request_batch.len() {
+                        warn!(
+                            attempt = attempt + 1,
+                            batch = batch_idx + 1,
+                            batches = batch_count,
+                            expected = request_batch.len(),
+                            received = books.len(),
+                            "ws: authoritative resync returned incomplete batched book set"
+                        );
+                        fetch_failed = true;
+                        break;
+                    }
+                    aggregated.append(&mut books);
+                }
+                Err(e) => {
+                    warn!(
+                        attempt = attempt + 1,
+                        batch = batch_idx + 1,
+                        batches = batch_count,
+                        err = %e,
+                        "ws: authoritative resync snapshot fetch failed"
+                    );
+                    fetch_failed = true;
+                    break;
+                }
             }
-            Err(e) => {
-                warn!(
-                    attempt = attempt + 1,
-                    err = %e,
-                    "ws: authoritative resync snapshot fetch failed"
-                );
+        }
+
+        if !fetch_failed {
+            let returned: HashSet<String> = aggregated
+                .iter()
+                .map(|book| book.asset_id.to_string())
+                .collect();
+            if returned == expected && aggregated.len() == requests.len() {
+                return Some(aggregated);
             }
+
+            warn!(
+                attempt = attempt + 1,
+                expected = requests.len(),
+                received = aggregated.len(),
+                "ws: authoritative resync returned incomplete aggregated book set"
+            );
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
     }
 
     None
+}
+
+fn authoritative_batch_count(total_requests: usize) -> usize {
+    if total_requests == 0 {
+        0
+    } else {
+        ((total_requests - 1) / AUTHORITATIVE_BOOK_BATCH_SIZE) + 1
+    }
 }
 
 fn jitter_retry_delay() -> std::time::Duration {
@@ -278,7 +323,7 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use super::prioritized_token_ids;
+    use super::{authoritative_batch_count, prioritized_token_ids, AUTHORITATIVE_BOOK_BATCH_SIZE};
     use crate::market::discovery::{TokenInfo, TradableMarket};
     use rust_decimal_macros::dec;
 
@@ -333,5 +378,20 @@ mod tests {
         let ids = prioritized_token_ids(&universe, 1, false);
 
         assert_eq!(ids, vec!["tok_reward".to_string()]);
+    }
+
+    #[test]
+    fn authoritative_batch_count_matches_batch_size() {
+        assert_eq!(authoritative_batch_count(0), 0);
+        assert_eq!(authoritative_batch_count(1), 1);
+        assert_eq!(authoritative_batch_count(AUTHORITATIVE_BOOK_BATCH_SIZE), 1);
+        assert_eq!(
+            authoritative_batch_count(AUTHORITATIVE_BOOK_BATCH_SIZE + 1),
+            2
+        );
+        assert_eq!(
+            authoritative_batch_count(AUTHORITATIVE_BOOK_BATCH_SIZE * 3),
+            3
+        );
     }
 }
